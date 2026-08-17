@@ -1,0 +1,15 @@
+# 비밀·배포별 값 — .env.example 만 추적
+.env
+
+# python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# 런타임 산출물
+logs/
+outputs/
+tmp/
+data/

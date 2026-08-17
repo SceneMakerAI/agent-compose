@@ -1,0 +1,18 @@
+[Unit]
+Description=Agent Compose — SceneMaker 질의 기반 하이라이트 편성 API (FastAPI/uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+WorkingDirectory=/usr/service/source/scenemaker/agent/agent-compose
+Environment=PYTHONPATH=src
+ExecStart=/usr/service/source/scenemaker/agent/agent-compose/.venv/bin/python src/run.py
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
