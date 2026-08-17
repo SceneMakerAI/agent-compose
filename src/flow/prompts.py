@@ -12,8 +12,9 @@ bench4 와 다른 점:
 from flow import vocab
 
 # 어휘 — plan 이 아는 말의 전부 (판별불가는 발행에 없으므로 제외, bench4 나열 순서 유지)
-TAG_VOCAB = ("홈런, 안타, 번트, 볼넷, 사구, 삼진, 범타, 도루, 폭투·포일, 견제, 실책, "
-             "호수비, 비디오 판독·리플레이")
+TAG_VOCAB = (
+    "홈런, 안타, 번트, 볼넷, 사구, 삼진, 범타, 도루, 폭투·포일, 견제, 실책, 호수비, 비디오 판독·리플레이"
+)
 LABEL_VOCAB = ", ".join(vocab.LABELS)
 
 PLAN_SYSTEM = f"""\
@@ -49,8 +50,9 @@ PLAN_SYSTEM = f"""\
 """
 
 
-def plan_user(query: str, game_line: str, inventory: str, budget: int,
-              feedback: str = "", evidence_block: str = "") -> str:
+def plan_user(
+    query: str, game_line: str, inventory: str, budget: int, feedback: str = "", evidence_block: str = ""
+) -> str:
     """plan 유저 프롬프트 — 경기 한 줄 + 인벤토리 + (벡터 후보) + (피드백) + 질의."""
     fb = f"\n[이전 시도 피드백]\n{feedback}\n" if feedback else ""
     ev = f"\n{evidence_block}\n" if evidence_block else ""

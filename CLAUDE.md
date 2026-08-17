@@ -25,6 +25,22 @@ PYTHONPATH=src uv run python src/run.py     # .env 의 APP_HOST/APP_PORT (8084)
 uv run pytest tests/ -q
 ```
 
+## 배포 (sm-api-01 — worker-prep-vision 방식)
+
+서버 디렉토리 `/usr/service/source/scenemaker/agent/agent-compose` 가 GitHub
+`SceneMakerAI/agent-compose`(public)의 clone (소유자 agent). **정본은 GitHub main** —
+로컬 수정은 commit+push 후 서버에서:
+
+```bash
+deploy/update.sh            # origin/main 신규 커밋 있으면 sync+재기동, 없으면 no-op
+deploy/update.sh --force    # 강제 재기동
+```
+
+- `.env` 는 미추적이라 `reset --hard` 에도 보존 (서버 값: Milvus·DB 사설, LLM/embed GA).
+- systemd 유닛(`agent-compose.service`)도 `deploy/` 가 정본 — 달라지면 자동 설치.
+- readyz 게이트는 embed(GPU)·Milvus 원격 프로브 포함 — **GPU 야간 자동 중지 시간대엔
+  실패가 정상** (배포 실패 아님, 스크립트 경고 문구 참조).
+
 ## API
 
 - `POST /api/v1/ingest {v_id}` → 202. 증거 수집→임베딩→Milvus v_id 교체 (멱등).
