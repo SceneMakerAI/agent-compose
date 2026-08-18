@@ -42,7 +42,7 @@ curl -X POST localhost:8084/api/v1/ingest \
 # → {"v_id": 202, "status": "accepted"}
 ```
 
-- 전제: `t_scene(source='board')` 발행본 존재 — 없으면 백그라운드 실패(로그 기록).
+- 전제: `t_scene_baseball(source='board')` 발행본 존재 — 없으면 백그라운드 실패(로그 기록).
 - 같은 v_id 진행 중이면 **409** `ALREADY_RUNNING`.
 - 소요: 수십 초 (임베딩 배치).
 
@@ -113,6 +113,29 @@ curl 'localhost:8084/api/v1/compose?comp_id=6'
 ```
 
 `t_compose` 헤더 + `clips` 배열. 없으면 404 `COMPOSE_NOT_FOUND`.
+
+### 렌더 (render) — 편성을 mp4 로
+
+#### `POST /api/v1/render` — 동기 (렌더 완주까지 대기)
+
+저장된 편성(comp_id)을 worker-render 에 넘겨 하이라이트 mp4 를 만든다.
+클립을 이닝 키(`3회 초` → `3_top`)로 그룹핑해 전달하며, 원본은
+worker-prep-stt 산출 고정 파일명(`source.mp4`)을 쓴다.
+
+```bash
+curl -X POST localhost:8084/api/v1/render \
+  -H 'Content-Type: application/json' -d '{"comp_id": 5, "bumper": true}'
+# → {"comp_id": 5, "v_id": 202, "status": "done",
+#    "output_path": "/mnt/nvme/vod/202/c_5.mp4", "error": ""}
+```
+
+- `bumper`(기본 true): 이닝 그룹 사이 범퍼 삽입.
+- 상태 저장 없음 — 요청-응답으로 끝. 실패는 응답으로 드러난다.
+- 사전 차단 (worker 호출 전 이쪽에서 거른다):
+  - **409** `COMPOSE_NOT_RENDERABLE` — status=empty 또는 클립 0건 (빈 렌더 금지)
+  - **422** `COMPOSE_INVALID_INNING` — 이닝 없는 클립 존재 (발행 데이터 결함 신호)
+  - **404** `COMPOSE_NOT_FOUND`
+- **502** `RENDER_FAILED` — worker-render 접속 불가·타임아웃·오류 응답.
 
 ### 헬스
 

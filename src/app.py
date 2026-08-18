@@ -19,6 +19,7 @@ from flow import vocab
 from flow.graph import build_graph
 from flow.llm import ChatLLM
 from log import get_logger, setup_logging
+from render.client import RenderClient
 from vector.embedder import Embedder
 from vector.store import VectorStore
 
@@ -48,6 +49,7 @@ async def lifespan(app: FastAPI):
     app.state.embedder = Embedder(settings)
     app.state.vector = VectorStore(settings)
     app.state.llm = ChatLLM(settings)
+    app.state.render = RenderClient(settings)   # readyz 미포함 — GPU 야간 중지 오탐 회피
     # 그래프는 무상태 배선 — 프로세스당 1회 컴파일 (요청마다 재컴파일 금지)
     app.state.graph = build_graph(app.state.llm, app.state.embedder, app.state.vector)
 
@@ -61,6 +63,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await app.state.render.aclose()
         await app.state.llm.aclose()
         await app.state.embedder.aclose()
         await app.state.vector.aclose()
@@ -77,8 +80,12 @@ async def unhandled_exception_handler(request: Request, _exc: Exception) -> JSON
     log.exception("처리되지 않은 오류: %s %s", request.method, request.url.path)
     return JSONResponse(
         status_code=500,
-        content={"detail": {"code": "INTERNAL_ERROR",
-                            "message": "서버 내부 오류가 발생했습니다."}},
+        content={
+            "detail": {
+                "code": "INTERNAL_ERROR", 
+                "message": "서버 내부 오류가 발생했습니다."
+            }
+        },
     )
 
 

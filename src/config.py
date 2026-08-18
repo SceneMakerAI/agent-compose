@@ -35,13 +35,17 @@ class Settings(BaseSettings):
     llm_base_url: str                   # 예: http://host:8002/v1
     llm_model: str = "qwen"
     llm_timeout: float = 240.0
-    llm_thinking: bool = True           # plan 노드만 thinking — flow 쪽에서 선별 적용
+    llm_thinking: bool = True           # 전역 스위치 — 끄면 그래프 전 콜 thinking 비활성
 
     # --- embedding (색인·질의 — openai 호환 /v1/embeddings) ---
     embed_base_url: str                 # 예: http://host:8003/v1
     embed_model: str = "qwen-embed"
     embed_timeout: float = 60.0
     embed_batch: int = 64               # 색인 배치 크기 — 문서 수백 건을 나눠 보낸다
+
+    # --- worker-render (하이라이트 mp4 렌더링 — 동기 호출) ---
+    render_base_url: str                # 예: http://host:8003 — 테스트 기간은 GA 경유
+    render_timeout: float = 600.0       # sync_yn=True 완주 대기 상한 (LLM 보다 길게)
 
     # --- Milvus ---
     milvus_uri: str                     # 예: http://host:19530 — 접속 불가는 readyz 가 노출
@@ -62,7 +66,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_path: str | None = None
 
-    @field_validator("llm_base_url", "embed_base_url", "milvus_uri")
+    @field_validator("llm_base_url", "embed_base_url", "milvus_uri", "render_base_url")
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         """끝 슬래시 제거 — 경로 이어 붙일 때 `//` 방지."""

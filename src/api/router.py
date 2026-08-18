@@ -2,9 +2,10 @@
 
 from fastapi import APIRouter
 
-from api import compose, health, ingest
+from api import compose, health, ingest, render
 
 api_router = APIRouter()
 api_router.include_router(health.router)
 api_router.include_router(ingest.router, prefix="/api/v1", tags=["ingest"])
 api_router.include_router(compose.router, prefix="/api/v1", tags=["compose"])
+api_router.include_router(render.router, prefix="/api/v1", tags=["render"])
