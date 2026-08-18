@@ -55,8 +55,7 @@ async def lifespan(app: FastAPI):
     embed_ok = await app.state.embedder.ready()
     milvus_ok = await app.state.vector.ready()
     llm_ok = await app.state.llm.ready()
-    log.info("접속 테스트 — DB: %s / embed: %s / Milvus: %s / LLM: %s",
-             db_ok, embed_ok, milvus_ok, llm_ok)
+    log.info("접속 테스트 — DB: %s / embed: %s / Milvus: %s / LLM: %s", db_ok, embed_ok, milvus_ok, llm_ok)
     log.info("AGENT COMPOSE 준비 완료.")
 
     try:

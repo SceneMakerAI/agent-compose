@@ -123,8 +123,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore):
         # verify = 소견 전용 — 의심은 리포트로, 클립은 유지
         text = await llm.chat(
             prompts.VERIFY_SYSTEM,
-            prompts.verify_user(plan.spec_line(st["spec"]),
-                                _packets(st["inv"], st["picked"])))
+            prompts.verify_user(plan.spec_line(st["spec"]), _packets(st["inv"], st["picked"])))
         log.info("verify 응답: %r", text)
         suspected, per, common = plan.parse_verify(text)
         if suspected:
@@ -147,9 +146,9 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore):
     g.add_edge(START, "retrieve")
     g.add_edge("retrieve", "plan")
     g.add_edge("plan", "cutrank")
-    g.add_conditional_edges("cutrank", route,
-                            {"feedback": "feedback", "backfill": "backfill",
-                             "endfix": "endfix", "empty": "empty"})
+    g.add_conditional_edges(
+        "cutrank", route, {"feedback": "feedback", "backfill": "backfill", "endfix": "endfix", "empty": "empty"}
+    )
     g.add_edge("feedback", "plan")
     g.add_edge("backfill", "endfix")
     g.add_edge("endfix", "verify")
@@ -158,8 +157,8 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore):
     return g.compile()
 
 
-async def run_compose(graph, inv: Inventory, query: str, budget: int | None,
-                      on_node=None) -> ComposeState:
+async def run_compose(
+    graph, inv: Inventory, query: str, budget: int | None, on_node=None) -> ComposeState:
     """그래프 1회 실행 — stream 으로 노드 순서를 로그에 남기고 델타를 누적한다.
 
     on_node(node_name): 노드 완료 콜백 — API 가 job 진행 표시에 쓴다 (폴링 응답의
@@ -170,9 +169,9 @@ async def run_compose(graph, inv: Inventory, query: str, budget: int | None,
     async for step in graph.astream({"query": query, "budget": budget, "inv": inv},
                                     stream_mode="updates"):
         for node, upd in step.items():
-            log.info("── 노드 %s 완료 (갱신: %s)", node,
-                     ", ".join(k for k in (upd or ()) if k != "inv") or "-")
+            log.info("── 노드 %s 완료 (갱신: %s)", node, ", ".join(k for k in (upd or ()) if k != "inv") or "-")
             state.update(upd or {})
+            
             if on_node:
                 on_node(node)
     return state
@@ -281,9 +280,11 @@ def _packets(inv: Inventory, clips: list[dict]) -> str:
         shots = " → ".join(t or "미분류" for _, _, t in c["cut"]["shots"][:6]) or "-"
         overlap = [t for us, ue, t in inv.utts if us < c["e"] and ue > c["s"]]
         stt = " / ".join(overlap[:3])[:200]            # bench4 LIMIT 3 등가
+        
         lines.append(
             f"[{c['scene_id']}] {c['scene_type']} ({c['labels'] or '라벨없음'}) "
             f"{c['inning']} {c['score_before']}→{c['score'].split()[1]}\n"
             f"    화면: {shots}\n"
-            f"    대사: {stt or '(없음)'}")
+            f"    대사: {stt or '(없음)'}"
+        )
     return "\n".join(lines)
