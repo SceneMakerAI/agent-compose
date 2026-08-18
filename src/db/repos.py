@@ -1,10 +1,11 @@
 """읽기 repository — 편성·색인이 소비하는 상류 산출 조회 (raw SQL 은 여기에만).
 
-이 모듈은 상류 계약의 소비 지점이다: t_scene(source='board', 발행본) / t_segment
-(상류 prep-vision 분할, 샷+caption) / t_dialogue(STT) / t_frame_board_detail
-(kind='ETC', 하단 자막 OCR). seg_id 로 t_scene↔t_segment 를 조인하지 않는다 —
-양쪽 다 delete-insert 라 재실행 시 ID 가 어긋난다 (bench4 관례 계승).
-t_scene 시간은 start_ms/end_ms(밀리초 INT) — 초 단위로 환산해 돌려준다.
+이 모듈은 상류 계약의 소비 지점이다: t_scene_baseball(source='board', 발행본) /
+t_segment(상류 prep-vision 분할, 샷+caption) / t_dialogue(STT) /
+t_frame_baseball_board_detail(kind='ETC', 하단 자막 OCR) / t_play_baseball(전이 원장).
+seg_id 로 scene↔segment 를 조인하지 않는다 — 양쪽 다 delete-insert 라 재실행 시
+ID 가 어긋난다 (bench4 관례 계승). scene 시간은 start_ms/end_ms(밀리초 INT) —
+초 단위로 환산해 돌려준다. (테이블명 *_baseball 접미는 2026-08 DB 정리 리네임.)
 """
 
 from asyncmy.cursors import DictCursor
@@ -25,7 +26,7 @@ class SourceRepo:
     async def fetch_scenes(self, v_id: int) -> list[dict]:
         """
         Summary:
-            발행본(t_scene, source='board') 전량 — 선곡 인벤토리·색인 귀속 기준.
+            발행본(t_scene_baseball, source='board') 전량 — 선곡 인벤토리·색인 귀속 기준.
         Args:
             v_id (int): 대상 영상 id.
         Returns:
@@ -33,7 +34,7 @@ class SourceRepo:
                 scene_type, inning, score, score_before, score_delta, pitch_sec,
                 obs_sec}.
         Description:
-            - obs_sec = t_play.end_sec(전광판 관측 시각) — 전이 원장이 보증하는 플레이
+            - obs_sec = t_play_baseball.end_sec(전광판 관측 시각) — 전이 원장이 보증하는 플레이
               결과 시점. cut 의 관측 하한(컷은 이 시점 이전에 끝날 수 없다) 재료.
         """
         sql = (
@@ -41,8 +42,8 @@ class SourceRepo:
             "       sc.score_before, sc.score_delta, sc.labels, sc.pitch_sec, "
             "       sc.start_ms / 1000 AS s, sc.end_ms / 1000 AS e, "
             "       p.end_sec AS obs_sec "
-            "FROM t_scene sc "
-            "LEFT JOIN t_play p ON p.v_id = sc.v_id AND p.h_id = sc.h_id "
+            "FROM t_scene_baseball sc "
+            "LEFT JOIN t_play_baseball p ON p.v_id = sc.v_id AND p.h_id = sc.h_id "
             "WHERE sc.v_id = %s AND sc.source = 'board' ORDER BY sc.scene_id"
         )
         async with self._db.acquire() as conn, conn.cursor(cursor=DictCursor) as cur:
@@ -112,13 +113,16 @@ class SourceRepo:
     async def fetch_etc_rows(self, v_id: int) -> list[tuple[int, str]]:
         """
         Summary:
-            하단 자막 OCR(t_frame_board_detail, kind='ETC') — 매치업·선수 기록 재료.
+            하단 자막 OCR(t_frame_baseball_board_detail, kind='ETC') — 매치업·선수 기록 재료.
         Returns:
-            list[tuple]: (idx(초), txt) 시간순.
+            list[tuple]: (초, txt) 시간순.
+        Description:
+            - idx_sec 사용 — idx 는 프레임 인덱스라 샘플링 주기가 바뀌면 초와 어긋난다
+              (현재 1fps 라 값이 같지만 idx_sec 이 의미상 정본, DB 정리 2026-08).
         """
         sql = (
-            "SELECT idx, txt FROM t_frame_board_detail "
-            "WHERE v_id = %s AND kind = 'ETC' AND txt <> '' ORDER BY idx"
+            "SELECT idx_sec, txt FROM t_frame_baseball_board_detail "
+            "WHERE v_id = %s AND kind = 'ETC' AND txt <> '' ORDER BY idx_sec"
         )
         async with self._db.acquire() as conn, conn.cursor() as cur:
             await cur.execute(sql, (v_id,))

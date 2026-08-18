@@ -4,7 +4,7 @@ bench4 tools/index_evidence.py 의 서비스 이식. 증거 세 종을 한 컬�
 - shot: t_segment.summary (scene 단계 caption, 시각 증거)
 - stt : t_dialogue — 인접 발화를 청크로 병합 (실측: 발화 단위 그대로면 "네"·"칠구"
   같은 0.1~1s 파편이 코사인 상위를 점령해 검색이 무너진다)
-- etc : t_frame_board_detail(kind=ETC) 하단 자막 OCR — 매치업·선수 기록. 인물 질의를
+- etc : t_frame_baseball_board_detail(kind=ETC) 하단 자막 OCR — 매치업·선수 기록. 인물 질의를
   caption(이름 환각)·STT(전사 깨짐)가 아니라 자막 사실로 잡는 재료. 런 병합 후 색인.
 소속 장면(scene_id)은 시간 겹침 최대치로 귀속 — seg_id 조인 금지 관례. 겹침 없으면 -1
 (발행 누락·장면 밖 콜 회수도 목적의 일부라 버리지 않는다).
@@ -121,11 +121,12 @@ async def ingest(v_id: int, repo: SourceRepo, embedder: Embedder,
     Returns:
         dict: {v_id, rows, mapped, orphan, by_kind} 색인 요약.
     Raises:
-        ValueError: 발행본(t_scene) 이 없으면 — 색인 전제 미충족 (조용한 성공 금지).
+        ValueError: 발행본(t_scene_baseball) 이 없으면 — 색인 전제 미충족 (조용한 성공 금지).
     """
     scenes = await repo.fetch_scenes(v_id)
     if not scenes:
-        raise ValueError(f"t_scene(source='board') 이 비어 있음 — publish 선행 필요 (v_id={v_id})")
+        raise ValueError(
+            f"t_scene_baseball(source='board') 이 비어 있음 — publish 선행 필요 (v_id={v_id})")
 
     evidence: list[tuple[str, float, float, str, str]] = []
     for r in await repo.fetch_shots(v_id):

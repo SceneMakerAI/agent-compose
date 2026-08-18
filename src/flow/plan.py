@@ -14,7 +14,7 @@ DEFAULT_BUDGET_SEC = 180    # 질의·인자에 예산이 없을 때 (bench4 운
 
 
 def render_inventory(scenes: list[dict]) -> str:
-    """t_scene 행 → plan 이 보는 목록 한 줄씩 (경기 단위라 전 행 — 2~3KB)."""
+    """t_scene_baseball 행 → plan 이 보는 목록 한 줄씩 (경기 단위라 전 행 — 2~3KB)."""
     lines = []
     for r in scenes:
         before = r["score_before"] or "?"

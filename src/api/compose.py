@@ -32,16 +32,16 @@ class ComposeRequest(BaseModel):
 
 
 @router.post("/compose", status_code=202)
-async def post_compose(req: ComposeRequest, request: Request,
-                       background: BackgroundTasks) -> dict:
+async def post_compose(req: ComposeRequest, request: Request, background: BackgroundTasks) -> dict:
     """편성 접수 — 202 {job_id} 반환, 완료는 GET /compose/{job_id} 로 폴링."""
     job_id = uuid.uuid4().hex[:12]
-    _JOBS[job_id] = {"status": "running", "v_id": req.v_id, "query": req.query,
-                     "progress": []}
+    _JOBS[job_id] = {
+        "status": "running", "v_id": req.v_id, "query": req.query, "progress": []}
     if len(_JOBS) > _JOBS_MAX:
         for k in [k for k, j in _JOBS.items() if j["status"] != "running"][:50]:
             _JOBS.pop(k, None)
     background.add_task(_run, request, job_id, req)
+    
     return {"job_id": job_id, "status": "running"}
 
 
@@ -69,22 +69,30 @@ async def _run(request: Request, job_id: str, req: ComposeRequest) -> None:
     try:
         with bind_v_id(req.v_id):
             result = await _compose_once(st, req, _JOBS[job_id]["progress"])
-        _JOBS[job_id] = {"status": result["status"], "v_id": req.v_id,
-                         "query": req.query, **result}
+        _JOBS[job_id] = {"status": result["status"], "v_id": req.v_id, "query": req.query, **result}
+        
     except asyncio.CancelledError:
         raise
+    
     except Exception as e:
         log.exception("compose 실패: v_id=%s %r", req.v_id, req.query)
-        _JOBS[job_id] = {"status": "error", "v_id": req.v_id, "query": req.query,
-                         "error": f"{type(e).__name__}: {e}"}
+        _JOBS[job_id] = {
+            "status": "error", 
+            "v_id": req.v_id, 
+            "query": req.query, 
+            "error": f"{type(e).__name__}: {e}"
+        }
 
 
 async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
     """인벤토리 스냅샷 → run_compose → 클립 요약 + t_compose 저장."""
     repo: SourceRepo = st.repo
     scenes = await repo.fetch_scenes(req.v_id)
+    
     if not scenes:
-        raise ValueError(f"t_scene(source='board') 이 비어 있음 — publish 선행 필요 (v_id={req.v_id})")
+        raise ValueError(
+            f"t_scene_baseball(source='board') 이 비어 있음 — publish 선행 필요 (v_id={req.v_id})")
+    
     segs = [{"seg_id": i, **r} for i, r in enumerate(await repo.fetch_shots_all(req.v_id), 1)]
     utts = tuple(await repo.fetch_utterances(req.v_id))
     parts = scenes[0]["score"].split()
@@ -94,8 +102,7 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
         inventory_text=plan_mod.render_inventory(scenes),
     )
 
-    state = await run_compose(st.graph, inv, req.query, req.budget,
-                              on_node=progress.append)
+    state = await run_compose(st.graph, inv, req.query, req.budget, on_node=progress.append)
 
     clips = [_clip_row(r) for r in state.get("picked", [])]
     comp_id = await st.compose_repo.save(

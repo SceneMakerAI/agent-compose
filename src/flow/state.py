@@ -20,7 +20,7 @@ class Inventory:
     """요청 시점 DB 스냅샷 — 필드는 읽기 전용으로만 쓴다 (행 수정 금지)."""
 
     v_id: int
-    scenes: tuple[dict, ...]                  # t_scene 발행 행 (s·e·tags·label_list …)
+    scenes: tuple[dict, ...]                  # t_scene_baseball 발행 행 (s·e·tags·label_list …)
     segs: tuple[dict, ...]                    # scene-cut 샷 (s·e·shot_type)
     utts: tuple[tuple[float, float, str], ...]  # STT (s, e, text) 시간순
     game_line: str                            # "v_id=201  삼성(원정) vs 롯데(홈)"

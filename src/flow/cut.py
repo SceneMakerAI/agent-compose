@@ -19,7 +19,7 @@ log = get_logger(__name__)
 
 
 def clip(r: dict, segs: list[dict], utts: list[tuple[float, float, str]] = ()) -> dict:
-    """t_scene 행 1건 → {cs, ce, shots:[(s,e,type)], anchor, mode}."""
+    """t_scene_baseball 행 1건 → {cs, ce, shots:[(s,e,type)], anchor, mode}."""
     lo, hi = r["s"], r["e"]
     shots = [s for s in segs if s["s"] < hi and s["e"] > lo]
     if not shots or set(r["tags"]) & vocab.FULL_CLIP_TAGS:
