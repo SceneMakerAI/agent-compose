@@ -28,7 +28,9 @@ uv run pytest tests/ -q
 ## 배포 (sm-api-01 — worker-prep-vision 방식)
 
 서버 디렉토리 `/usr/service/source/scenemaker/agent/agent-compose` 가 GitHub
-`SceneMakerAI/agent-compose`(public)의 clone (소유자 agent). **정본은 GitHub main** —
+`SceneMakerAI/agent-compose`(**private** — 서버는 agent 계정의 read-only **deploy key**
++ ssh 별칭 `github.com-agent-compose` 으로 fetch)의 clone (소유자 agent).
+**정본은 GitHub main** —
 로컬 수정은 commit+push 후 서버에서:
 
 ```bash

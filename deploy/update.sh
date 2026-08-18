@@ -8,7 +8,7 @@
 #   deploy/update.sh --force    # 변경 없어도 sync + 재기동 강제
 #
 # 전제:
-#   - 배포 디렉토리가 GitHub(public) 를 origin 으로 둔 git clone, 소유자 agent
+#   - 배포 디렉토리가 GitHub 를 origin(ssh 별칭 + read-only deploy key) 으로 둔 git clone, 소유자 agent
 #     (최초 1회 부트스트랩은 CLAUDE.md 참조)
 #   - .env 는 gitignore(미추적)라 reset --hard 에도 보존된다
 set -euo pipefail
