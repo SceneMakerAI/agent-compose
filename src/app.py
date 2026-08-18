@@ -15,6 +15,7 @@ from config import Settings, get_settings
 from db.compose_repo import ComposeRepo
 from db.pool import Database
 from db.repos import SourceRepo
+from db.status_repo import StatusRepo
 from flow import vocab
 from flow.graph import build_graph
 from flow.llm import ChatLLM
@@ -46,6 +47,7 @@ async def lifespan(app: FastAPI):
     app.state.db = await Database.connect(settings)
     app.state.repo = SourceRepo(app.state.db)
     app.state.compose_repo = ComposeRepo(app.state.db)
+    app.state.status = StatusRepo(app.state.db)     # t_video.status_code 4000번대 기록
     app.state.embedder = Embedder(settings)
     app.state.vector = VectorStore(settings)
     app.state.llm = ChatLLM(settings)

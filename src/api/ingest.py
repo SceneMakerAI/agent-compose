@@ -10,6 +10,7 @@ import asyncio
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
 
+from db.status_repo import COMPOSE_ERROR_INGEST, COMPOSE_ERROR_SOURCE, COMPOSE_INGEST, COMPOSE_OK
 from log import bind_v_id, get_logger
 from vector.ingest import ingest
 
@@ -46,14 +47,24 @@ async def post_ingest(req: IngestRequest, request: Request,
 
 
 async def _run(request: Request, v_id: int) -> None:
-    """백그라운드 본체 — 실패는 로그로 (조용히 삼키지 않고 원인 기록)."""
+    """백그라운드 본체 — 실패는 로그로 (조용히 삼키지 않고 원인 기록).
+
+    t_video.status_code: 4010 색인 중 → 4000 완료 / 4910 발행본 없음 / 4920 실패.
+    """
+    st = request.app.state
     try:
         with bind_v_id(v_id):
-            await ingest(v_id, request.app.state.repo, request.app.state.embedder, request.app.state.vector)
+            await st.status.set(v_id, COMPOSE_INGEST)
+            await ingest(v_id, st.repo, st.embedder, st.vector)
+            await st.status.set(v_id, COMPOSE_OK)
     except asyncio.CancelledError:
         raise
-    except Exception:
+    except ValueError as e:
         log.exception("ingest 실패: v_id=%s", v_id)
+        await st.status.set(v_id, COMPOSE_ERROR_SOURCE, str(e))
+    except Exception as e:
+        log.exception("ingest 실패: v_id=%s", v_id)
+        await st.status.set(v_id, COMPOSE_ERROR_INGEST, f"{type(e).__name__}: {e}")
     finally:
         _RUNNING.discard(v_id)
 

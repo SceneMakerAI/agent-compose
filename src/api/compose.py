@@ -14,6 +14,17 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
 
 from db.repos import SourceRepo
+from db.status_repo import (
+    COMPOSE_CUT,
+    COMPOSE_EMPTY,
+    COMPOSE_ERROR,
+    COMPOSE_ERROR_RENDER,
+    COMPOSE_ERROR_SOURCE,
+    COMPOSE_OK,
+    COMPOSE_PLAN,
+    COMPOSE_RENDER,
+    COMPOSE_VERIFY,
+)
 from flow import plan as plan_mod
 from flow.graph import run_compose
 from flow.state import Inventory
@@ -25,6 +36,11 @@ router = APIRouter()
 
 _JOBS: dict[str, dict] = {}     # job_id → {status, v_id, query, result?, error?}
 _JOBS_MAX = 200                 # 오래된 완료 잡 정리 상한 (프로세스 수명 캐시)
+
+# 그래프 노드 → t_video 상태 코드 (UI 진행 표시 — 코드가 바뀌는 노드에서만 기록)
+_NODE_CODE = {"retrieve": COMPOSE_PLAN, "plan": COMPOSE_PLAN, "feedback": COMPOSE_PLAN,
+              "cutrank": COMPOSE_CUT, "backfill": COMPOSE_CUT, "endfix": COMPOSE_CUT,
+              "verify": COMPOSE_VERIFY}
 
 
 class ComposeRequest(BaseModel):
@@ -82,10 +98,12 @@ async def _run(request: Request, job_id: str, req: ComposeRequest) -> None:
     
     except Exception as e:
         log.exception("compose 실패: v_id=%s %r", req.v_id, req.query)
+        code = COMPOSE_ERROR_SOURCE if isinstance(e, ValueError) else COMPOSE_ERROR
+        await st.status.set(req.v_id, code, f"{type(e).__name__}: {e}")
         _JOBS[job_id] = {
-            "status": "error", 
-            "v_id": req.v_id, 
-            "query": req.query, 
+            "status": "error",
+            "v_id": req.v_id,
+            "query": req.query,
             "error": f"{type(e).__name__}: {e}"
         }
 
@@ -108,7 +126,18 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
         inventory_text=plan_mod.render_inventory(scenes),
     )
 
-    state = await run_compose(st.graph, inv, req.query, req.budget, on_node=progress.append)
+    await st.status.set(req.v_id, COMPOSE_PLAN)
+    last_code = COMPOSE_PLAN
+
+    async def on_node(node: str) -> None:
+        nonlocal last_code
+        progress.append(node)
+        code = _NODE_CODE.get(node)
+        if code and code != last_code:
+            last_code = code
+            await st.status.set(req.v_id, code)
+
+    state = await run_compose(st.graph, inv, req.query, req.budget, on_node=on_node)
 
     clips = [_clip_row(r) for r in state.get("picked", [])]
     comp_id = await st.compose_repo.save(
@@ -118,6 +147,13 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
     if req.render:
         progress.append("render")
         render_result = await _render_after(st, req, comp_id, state["status"], clips)
+    # 최종 상태 코드 — 렌더 실패 > empty > 완료 순으로 판정
+    if render_result and render_result.get("status") == "error":
+        await st.status.set(req.v_id, COMPOSE_ERROR_RENDER, render_result.get("error"))
+    elif state["status"] == "empty":
+        await st.status.set(req.v_id, COMPOSE_EMPTY)
+    else:
+        await st.status.set(req.v_id, COMPOSE_OK)
     return {
         **({"render": render_result} if render_result else {}),
         "comp_id": comp_id,
@@ -147,6 +183,7 @@ async def _render_after(st, req: ComposeRequest, comp_id: int, status: str,
         log.warning("렌더 생략(comp_id=%s): %s", comp_id, e)
         return {"status": "skipped", "reason": str(e)}
     try:
+        await st.status.set(req.v_id, COMPOSE_RENDER)
         result = await st.render.render(payload)
     except httpx.HTTPError as e:
         log.error("원샷 렌더 실패: comp_id=%s %s: %s", comp_id, type(e).__name__, e)

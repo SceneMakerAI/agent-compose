@@ -9,6 +9,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from db.status_repo import COMPOSE_ERROR_RENDER, COMPOSE_OK, COMPOSE_RENDER
 from log import bind_v_id, get_logger
 from render.payload import build_request
 
@@ -53,15 +54,18 @@ async def post_render(req: RenderRequest, request: Request) -> dict:
 
     with bind_v_id(comp["v_id"]):
         log.info("렌더 요청: comp_id=%s 클립 %d건 이닝 %s", req.comp_id, len(comp["clips"]), list(payload["innings"]))
+        await st.status.set(comp["v_id"], COMPOSE_RENDER)
         try:
             result = await st.render.render(payload)
         except httpx.HTTPError as e:
             log.error("렌더 실패: comp_id=%s %s: %s", req.comp_id, type(e).__name__, e)
+            await st.status.set(comp["v_id"], COMPOSE_ERROR_RENDER, f"{type(e).__name__}: {e}")
             raise HTTPException(502, detail={
                 "code": "RENDER_FAILED",
                 "message": f"{type(e).__name__}: {e}"
             }
         ) from e
         log.info("렌더 응답: %s", result)
+        await st.status.set(comp["v_id"], COMPOSE_OK)
 
     return {"comp_id": req.comp_id, "v_id": comp["v_id"], **result}

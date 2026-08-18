@@ -18,6 +18,7 @@ retrieve 실패는 전파 — bench4 의 fail-open 폐기 (서비스 결정, des
 그래프는 무상태 배선이라 **프로세스당 1회 컴파일** (bench4 는 요청마다).
 """
 
+import inspect
 import math
 import re
 
@@ -192,7 +193,9 @@ async def run_compose(
             state.update(upd or {})
             
             if on_node:
-                on_node(node)
+                r = on_node(node)
+                if inspect.isawaitable(r):      # async 콜백 지원 (상태 코드 DB 기록 등)
+                    await r
     return state
 
 
