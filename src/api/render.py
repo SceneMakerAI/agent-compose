@@ -40,27 +40,28 @@ async def post_render(req: RenderRequest, request: Request) -> dict:
         # empty 편성은 렌더하지 않는다 — 사전 차단 (빈 mp4 를 만들 이유가 없다)
         raise HTTPException(409, detail={
             "code": "COMPOSE_NOT_RENDERABLE",
-            "message": (f"comp_id={req.comp_id} status={comp['status']} "
-                        f"클립 {len(comp['clips'])}건 — 렌더 대상 아님"),
+            "message": (
+                f"comp_id={req.comp_id} status={comp['status']} " 
+                f"클립 {len(comp['clips'])}건 — 렌더 대상 아님"),
         })
 
     try:
         payload = build_request(comp["v_id"], req.comp_id, comp["clips"], req.bumper)
     except ValueError as e:
         # 이닝 결손 = 상류 발행 데이터 결함 — 렌더로 덮지 않고 드러낸다
-        raise HTTPException(422, detail={"code": "COMPOSE_INVALID_INNING",
-                                         "message": str(e)}) from e
+        raise HTTPException(422, detail={"code": "COMPOSE_INVALID_INNING", "message": str(e)}) from e
 
     with bind_v_id(comp["v_id"]):
-        log.info("렌더 요청: comp_id=%s 클립 %d건 이닝 %s",
-                 req.comp_id, len(comp["clips"]), list(payload["innings"]))
+        log.info("렌더 요청: comp_id=%s 클립 %d건 이닝 %s", req.comp_id, len(comp["clips"]), list(payload["innings"]))
         try:
             result = await st.render.render(payload)
         except httpx.HTTPError as e:
             log.error("렌더 실패: comp_id=%s %s: %s", req.comp_id, type(e).__name__, e)
             raise HTTPException(502, detail={
                 "code": "RENDER_FAILED",
-                "message": f"{type(e).__name__}: {e}"}) from e
+                "message": f"{type(e).__name__}: {e}"
+            }
+        ) from e
         log.info("렌더 응답: %s", result)
 
     return {"comp_id": req.comp_id, "v_id": comp["v_id"], **result}

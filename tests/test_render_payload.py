@@ -48,7 +48,7 @@ class TestBuildRequest:
     def test_고정_필드(self):
         req = build_request(202, 5, [_clip(1, "1회 초", 0, 10)], bumper=False)
         assert req["v_id"] == 202 and req["c_id"] == 5
-        assert req["file_name"] == SOURCE_FILE_NAME
+        assert req["file_name"] == f"202/{SOURCE_FILE_NAME}"   # v_id 접두 상대 경로
         assert req["sync_yn"] is True and req["bumper"] is False
 
     def test_클립_0건은_ValueError(self):

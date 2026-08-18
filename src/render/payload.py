@@ -1,8 +1,8 @@
 """worker-render 요청 변환 — t_compose_clip 행 → 렌더 페이로드 (순수 함수, 네트워크 무관).
 
 worker-render 계약 (2026-08-18 스펙):
-- file_name: 원본 파일명. worker-prep-stt 가 항상 /mnt/nvme/vod/{v_id}/source.mp4 로
-  만들므로 "source.mp4" 고정 — 경로가 아니라 파일명만 보낸다.
+- file_name: 원본 상대 경로 "{v_id}/source.mp4" — 워커의 vod 루트 기준. worker-prep-stt
+  가 항상 /mnt/nvme/vod/{v_id}/source.mp4 로 만든다 (v_id 접두 필수 — 실렌더 확인 2026-08-18).
 - innings: {"{이닝번호}_{top|bot}": [{start_sec, end_sec, start_hms, end_hms}, …]}.
   렌더링은 sec 값만 사용, hms 는 디버깅 표기용.
 - bumper: 이닝 그룹 사이 범퍼 삽입. 스펙 예제(bumper)와 표(bumper_yn)의 필드명이
@@ -79,7 +79,7 @@ def build_request(v_id: int, c_id: int, clips: list[dict], bumper: bool) -> dict
     return {
         "v_id": v_id,
         "c_id": c_id,
-        "file_name": SOURCE_FILE_NAME,
+        "file_name": f"{v_id}/{SOURCE_FILE_NAME}",
         "sync_yn": True,
         "bumper": bumper,
         "innings": innings,
