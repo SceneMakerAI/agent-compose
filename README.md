@@ -68,6 +68,10 @@ curl -X POST localhost:8084/api/v1/compose \
 ```
 
 - `budget`(초)은 선택 — 주면 질의 해석보다 우선. 생략 시 질의에서 해석 (기본 180).
+- `render`(기본 **false**): true 면 편성 ok 후 worker-render 까지 이어 호출하는 원샷 —
+  잡 결과에 `render` 필드({status, output_path} 또는 skipped/error 사유)가 추가된다.
+  empty·이닝 결손이면 렌더를 생략하고 사유를 남기며, 렌더 실패가 편성 성공을 뒤집지 않는다.
+  `bumper`(기본 true)는 render=true 일 때만 의미.
 - plan 노드가 thinking 이라 **총 1~3분** — 그래서 202 + 잡 폴링 패턴.
 - 질의는 어휘(태그·라벨)로 번역돼 선곡된다. "이닝별 하이라이트"는 이닝 커버리지,
   "득점 장면"은 적시타·역전·동점 등 득점 라벨 위주로 해석된다.

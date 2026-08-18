@@ -2,11 +2,14 @@
 
 plan(thinking)이 1~3분이라 202 + job 폴링 패턴 (단일 워커 전제 — ingest 와 동일).
 같은 v_id 동시 편성은 허용 — 읽기 전용 + comp_id 신규 발급이라 충돌이 없다.
+render=True 원샷: 편성 저장 후 ok 면 worker-render 까지 이어 호출 (기본 False —
+렌더 실패는 잡의 render 필드로만 드러나고 편성 성공을 뒤집지 않는다).
 """
 
 import asyncio
 import uuid
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
 
@@ -15,6 +18,7 @@ from flow import plan as plan_mod
 from flow.graph import run_compose
 from flow.state import Inventory
 from log import bind_v_id, get_logger
+from render.payload import build_request
 
 log = get_logger(__name__)
 router = APIRouter()
@@ -29,6 +33,8 @@ class ComposeRequest(BaseModel):
     v_id: int
     query: str
     budget: int | None = None    # 초 — 명시 시 질의 해석보다 우선
+    render: bool = False         # 원샷 옵션 — 편성 ok 면 이어서 mp4 렌더까지 (동기)
+    bumper: bool = True          # render=True 일 때만 — 이닝 그룹 사이 범퍼
 
 
 @router.post("/compose", status_code=202)
@@ -107,7 +113,13 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
     clips = [_clip_row(r) for r in state.get("picked", [])]
     comp_id = await st.compose_repo.save(
         req.v_id, req.query, state.get("spec"), state["status"], clips)
+
+    render_result = None
+    if req.render:
+        progress.append("render")
+        render_result = await _render_after(st, req, comp_id, state["status"], clips)
     return {
+        **({"render": render_result} if render_result else {}),
         "comp_id": comp_id,
         "spec": {k: v for k, v in (state.get("spec") or {}).items() if k != "raw"},
         "clips": clips,
@@ -118,6 +130,29 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
                     for o in state.get("evidence_orphan", [])],
         "status": state["status"],
     }
+
+
+async def _render_after(st, req: ComposeRequest, comp_id: int, status: str,
+                        clips: list[dict]) -> dict:
+    """원샷 렌더 — 편성이 ok 일 때만 worker-render 동기 호출.
+
+    렌더 실패가 편성 성공을 뒤집지 않는다 — 편성은 이미 저장됐으므로 잡의
+    render 필드에 사유만 남긴다 (empty·이닝 결손은 호출 전 생략 = 사전 차단).
+    """
+    if status != "ok" or not clips:
+        return {"status": "skipped", "reason": f"편성 status={status} 클립 {len(clips)}건 — 렌더 생략"}
+    try:
+        payload = build_request(req.v_id, comp_id, clips, req.bumper)
+    except ValueError as e:
+        log.warning("렌더 생략(comp_id=%s): %s", comp_id, e)
+        return {"status": "skipped", "reason": str(e)}
+    try:
+        result = await st.render.render(payload)
+    except httpx.HTTPError as e:
+        log.error("원샷 렌더 실패: comp_id=%s %s: %s", comp_id, type(e).__name__, e)
+        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+    log.info("원샷 렌더 완료: comp_id=%s %s", comp_id, result)
+    return result
 
 
 def _clip_row(r: dict) -> dict:
