@@ -53,11 +53,18 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore):
         inv = st["inv"]
         text = await llm.chat(
             prompts.PLAN_SYSTEM.replace("{budget}", str(plan.DEFAULT_BUDGET_SEC)),
-            prompts.plan_user(st["query"], inv.game_line, inv.inventory_text,
-                              plan.DEFAULT_BUDGET_SEC, st.get("feedback", ""),
-                              plan.render_evidence(st.get("evidence", []),
-                                                   st.get("evidence_orphan", []))),
-            thinking=True,      # 선곡 추론에만 심층 사고 (verify 는 소견 전용이라 제외)
+            prompts.plan_user(
+                st["query"], 
+                inv.game_line, 
+                inv.inventory_text, 
+                plan.DEFAULT_BUDGET_SEC, 
+                st.get("feedback", ""), 
+                plan.render_evidence(
+                    st.get("evidence", []), 
+                    st.get("evidence_orphan", [])
+                )
+            ),
+            thinking=True,      # 그래프 LLM 3콜(plan·endfix·verify) 전부 thinking (2026-08-18 결정)
         )
         log.info("plan 응답: %r", text)
         spec = plan.parse(text, list(inv.scenes))
@@ -112,7 +119,11 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore):
                 rows.append((r["scene_id"], ce, near))
         if not rows:
             return {}
-        text = await llm.chat(prompts.ENDFIX_SYSTEM, prompts.endfix_user(rows))
+        text = await llm.chat(
+            prompts.ENDFIX_SYSTEM,
+            prompts.endfix_user(rows),
+            thinking=True,
+        )
         moved = _apply_endfix(picked, rows, text)
         if moved:
             log.info("endfix: 끝 이동 %s", moved)
@@ -123,7 +134,12 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore):
         # verify = 소견 전용 — 의심은 리포트로, 클립은 유지
         text = await llm.chat(
             prompts.VERIFY_SYSTEM,
-            prompts.verify_user(plan.spec_line(st["spec"]), _packets(st["inv"], st["picked"])))
+            prompts.verify_user(
+                plan.spec_line(st["spec"]),
+                _packets(st["inv"], st["picked"])
+            ),
+            thinking=True,
+        )
         log.info("verify 응답: %r", text)
         suspected, per, common = plan.parse_verify(text)
         if suspected:
@@ -169,7 +185,10 @@ async def run_compose(
     async for step in graph.astream({"query": query, "budget": budget, "inv": inv},
                                     stream_mode="updates"):
         for node, upd in step.items():
-            log.info("── 노드 %s 완료 (갱신: %s)", node, ", ".join(k for k in (upd or ()) if k != "inv") or "-")
+            log.info(
+                "── 노드 %s 완료 (갱신: %s)", 
+                node, ", ".join(k for k in (upd or ()) if k != "inv") or "-"
+            )
             state.update(upd or {})
             
             if on_node:

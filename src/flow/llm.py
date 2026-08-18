@@ -37,7 +37,8 @@ class ChatLLM:
     async def chat(self, system: str, user: str, thinking: bool = False) -> str:
         """
         Summary:
-            시스템+유저 프롬프트로 1회 판정. thinking 은 호출자가 명시 (plan 만 True).
+            시스템+유저 프롬프트로 1회 판정. thinking 은 호출자가 명시
+            (그래프 3콜 전부 True — .env llm_thinking=0 으로 일괄 비활성 가능).
         Returns:
             str: <think> 제거된 본문. 본문이 비면 thinking 끄고 1회 재시도.
         """
