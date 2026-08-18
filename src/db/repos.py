@@ -30,13 +30,20 @@ class SourceRepo:
             v_id (int): 대상 영상 id.
         Returns:
             list[dict]: {scene_id, h_id, s, e, tags(list), label_list(list),
-                scene_type, inning, score, score_before, score_delta, pitch_sec}.
+                scene_type, inning, score, score_before, score_delta, pitch_sec,
+                obs_sec}.
+        Description:
+            - obs_sec = t_play.end_sec(전광판 관측 시각) — 전이 원장이 보증하는 플레이
+              결과 시점. cut 의 관측 하한(컷은 이 시점 이전에 끝날 수 없다) 재료.
         """
         sql = (
-            "SELECT scene_id, h_id, scene_type, inning, score, score_before, "
-            "       score_delta, labels, pitch_sec, "
-            "       start_ms / 1000 AS s, end_ms / 1000 AS e "
-            "FROM t_scene WHERE v_id = %s AND source = 'board' ORDER BY scene_id"
+            "SELECT sc.scene_id, sc.h_id, sc.scene_type, sc.inning, sc.score, "
+            "       sc.score_before, sc.score_delta, sc.labels, sc.pitch_sec, "
+            "       sc.start_ms / 1000 AS s, sc.end_ms / 1000 AS e, "
+            "       p.end_sec AS obs_sec "
+            "FROM t_scene sc "
+            "LEFT JOIN t_play p ON p.v_id = sc.v_id AND p.h_id = sc.h_id "
+            "WHERE sc.v_id = %s AND sc.source = 'board' ORDER BY sc.scene_id"
         )
         async with self._db.acquire() as conn, conn.cursor(cursor=DictCursor) as cur:
             await cur.execute(sql, (v_id,))

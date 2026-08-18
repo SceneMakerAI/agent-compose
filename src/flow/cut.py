@@ -28,6 +28,13 @@ def clip(r: dict, segs: list[dict], utts: list[tuple[float, float, str]] = ()) -
     anchor = None
     if r["pitch_sec"] is not None:
         anchor = next((s for s in shots if s["s"] <= r["pitch_sec"] < s["e"]), None)
+        if anchor is not None and anchor["shot_type"] is None:
+            # 앵커 교정 — pitch_sec 이 장면 경계의 미분류 부스러기 샷 꼬리에 걸리는 실측
+            # (v203 장면 6: 0.2초 볼넷 클립). 바로 뒤 '투구' 샷이 실제 투구다.
+            nxt = next((s for s in shots[shots.index(anchor) + 1:]
+                        if s["shot_type"] == "투구"), None)
+            if nxt is not None:
+                anchor = nxt
     if anchor is None:
         anchor = next((s for s in shots if s["shot_type"] == "투구"), None)
     if anchor is None:
@@ -57,10 +64,27 @@ def clip(r: dict, segs: list[dict], utts: list[tuple[float, float, str]] = ()) -
         else:
             break
     cs, ce = max(picked[0]["s"], lo), min(picked[-1]["e"], hi)
+    ce, floored = _obs_floor(ce, r.get("obs_sec"), shots, hi)
     ce, snapped = _snap_tail(ce, utts)
     return {"cs": cs, "ce": ce, "anchor": (anchor["s"], anchor["e"]),
             "shots": [(s["s"], s["e"], s["shot_type"]) for s in picked],
-            "mode": "레시피" + ("+대사꼬리" if snapped else "")}
+            "mode": "레시피" + ("+관측하한" if floored else "")
+                    + ("+대사꼬리" if snapped else "")}
+
+
+def _obs_floor(ce: float, obs: float | None, shots: list[dict],
+               hi: float) -> tuple[float, bool]:
+    """관측 하한 — 컷은 전이 원장이 보증하는 결과 시점(obs_sec) 이전에 끝날 수 없다.
+
+    레시피 체인은 샷 오분류 하나로 결과 전에 끊긴다(실측 v203 도루: '주루' 샷이
+    없어 도루 실물·리플레이가 잘림). 원장 경계 [투구→관측]은 결정적이므로,
+    끝을 관측이 속한 샷의 끝(장면 끝 상한)까지 보장한다 — 시간 상수 없음.
+    """
+    if obs is None or ce >= obs:
+        return ce, False
+    osh = next((x for x in shots if x["s"] <= obs < x["e"]), None)
+    floor = min(osh["e"] if osh else obs, hi)
+    return (floor, True) if floor > ce else (ce, False)
 
 
 def _full(r: dict, shots: list[dict], why: str, utts=()) -> dict:
