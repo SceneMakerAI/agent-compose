@@ -250,3 +250,64 @@ def verify_user(query: str, spec_line: str, packet: str) -> str:
 {packet}
 
 [질문] 이 클립의 일치도와 완결성은?"""
+
+
+# ── rank — 남은 후보 줄 세우기 (신설) ──────────────────────
+# 예산 절단은 산술이고 LLM 은 산술을 못 한다 — 예전에 맡겼을 때 900초 요청에
+# 947·949·964·977·1005·1018초가 나왔고 득점 포함률은 53%로 떨어졌다. 반대로
+# "무엇이 더 중요한가" 는 LLM 이 잘하는데 그걸 코드가 하고 있었다: 층 순서도
+# MUST_LABELS 도 하드코딩이라 "이닝별로 1개씩" 같은 요구가 도달할 통로가 없었다.
+# 그래서 **순위는 LLM, 합산은 코드**로 가른다.
+RANK_SYSTEM = """\
+당신은 야구 하이라이트 편성자다. 이미 확정된 장면을 빼고 남은 후보들을
+질의에 맞는 순서대로 줄 세운다. **담을지 말지는 정하지 않는다** — 순서만 정하면
+시스템이 예산만큼 위에서부터 담는다.
+
+[입력 읽는 법]
+- [이미 확정]은 득점·역전처럼 사실이 보증해 무조건 들어간 장면이다.
+  태그·이닝·점수가 함께 적혀 있으니 무엇이 이미 채워졌는지 보고 정한다.
+- [남은 후보]의 일치도는 검수자가 매긴 질의 부합도(0~3)다.
+
+[RULES]
+- 확정분과 같은 내용을 반복하지 않는다 — 겹치는 이닝·유형은 뒤로 미룬다.
+- 질의가 배분을 요구하면(예: "이닝별로") 확정에 없는 이닝을 앞으로 올리고,
+  같은 이닝 것을 연달아 놓지 않는다.
+- 일치도는 참고하되 절대 기준은 아니다 — 배분이 질의의 요구면
+  일치도 2가 3보다 앞설 수 있다.
+- 길이는 신경 쓰지 않는다. 예산 계산은 시스템이 한다.
+- 반드시 제시된 번호만 쓴다. 전부 나열한다(빠뜨리지 않는다).
+
+[OUTPUT — 한 줄, 다른 말 금지]
+순서: <번호 쉼표 나열>\
+"""
+
+
+def _clip_line(c: dict, score: int | None = None) -> str:
+    """rank 목록 한 줄 — 점수는 원정팀명을 붙여 어느 쪽이 올랐는지 바로 읽히게."""
+    away = (c.get("score") or " ").split()
+    money = f"{away[0]} {c['score_before']}→{away[1]}" if len(away) > 1 else "-"
+    dur = c["cut"]["ce"] - c["cut"]["cs"]
+    line = (f"  [{c['scene_id']:>2}]  {c['scene_type']:<4} "
+            f"{c.get('labels') or '-':<10} {c['inning']:<6} {money:<18} {dur:>3.0f}s")
+    return line + (f"  일치도 {score}" if score is not None else "")
+
+
+def rank_user(query: str, game_line: str, budget_left: int,
+              confirmed: list[dict], candidates: list[tuple[dict, int]]) -> str:
+    """rank 유저 프롬프트 — 질의 + 확정 목록(내용 포함) + 남은 후보.
+
+    확정을 **번호만** 주면 모델은 그게 어느 이닝의 무엇인지 몰라 중복을 피할 수 없다.
+    v201 은 확정 16건 중 11건이 적시타고 6회 초에만 다섯이 몰려 있어, 그 사실을
+    알아야 "6회는 됐고 비어 있는 이닝을 채우자" 가 나온다.
+    """
+    lines = [f"[질의] {query}", f"[경기] {game_line}",
+             f"[예산] 남은 {budget_left}s", ""]
+    if confirmed:
+        lines.append("[이미 확정 — 순서 대상 아님]")
+        lines += [_clip_line(c) for c in confirmed]
+        lines.append("")
+    lines.append("[남은 후보]")
+    lines += [_clip_line(c, sc) for c, sc in candidates]
+    lines.append("")
+    lines.append("[질문] 남은 예산에 담을 순서대로 번호를 나열하라.")
+    return "\n".join(lines)

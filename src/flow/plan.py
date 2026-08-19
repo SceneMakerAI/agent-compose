@@ -52,14 +52,38 @@ def render_inventory(scenes: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def render_evidence(evidence: list[dict], orphan: list[dict]) -> str:
-    """retrieve 결과 → plan 이 보는 벡터 후보 섹션. 비어 있으면 빈 문자열 (섹션 생략)."""
+KIND_LABEL = {"stt": "해설", "shot": "화면", "etc": "자막"}
+EVIDENCE_TEXT_MAX = 70          # 스니펫 표기 길이 (문장 중간 절단은 감수 — 전문은 색인에)
+
+
+def render_evidence(evidence: list[dict], orphan: list[dict],
+                    scenes: list[dict] | None = None) -> str:
+    """retrieve 결과 → plan 이 보는 벡터 후보 섹션. 비어 있으면 빈 문자열 (섹션 생략).
+
+    증거마다 **종류(해설·화면·자막)를 붙이고 종류별로 한 줄씩** 낸다. 종류를 지우면
+    모델이 "이게 사람이 한 말인지 화면 설명인지" 를 모르는데, system 프롬프트는
+    증거가 태그를 넘어설 권한을 준다 — 무엇을 믿을지 정하려면 출처를 알아야 한다.
+
+    scenes 를 주면 태그·이닝·점수를 같은 줄에 붙인다. 인벤토리와 이 블록이 번호로만
+    이어져 있어 조인이 모델 몫이던 문제(audit) 대응.
+    """
     if not evidence and not orphan:
         return ""
+    meta = {r["scene_id"]: r for r in (scenes or [])}
     lines = ["[벡터 후보 — 질의와 의미가 가까운 검색 증거 (참고)]"]
     for g in evidence:
-        sn = " / ".join(f"\"{t[:60]}\"" for t in g["snippets"])
-        lines.append(f"장면 {g['scene_id']} (증거 {g['hits']}건, 유사도 {g['sim']:.2f}): {sn}")
+        m = meta.get(g["scene_id"])
+        head = f"장면 {g['scene_id']}  유사도 {g['sim']:.2f}"
+        if m:
+            away = (m.get("score") or " ").split()
+            head += (f"  {m['scene_type']}"
+                     + (f"·{m['labels']}" if m.get("labels") else "")
+                     + f"  {m['inning']}"
+                     + (f"  {away[0]} {m['score_before']}→{away[1]}" if len(away) > 1 else ""))
+        lines.append(head)
+        for kind, texts in sorted(g.get("by_kind", {}).items()):
+            lines.append(f"   {KIND_LABEL.get(kind, kind)} "
+                         + " / ".join(f"\"{t[:EVIDENCE_TEXT_MAX]}\"" for t in texts[:2]))
     for o in orphan:
         lines.append(f"※ 장면 밖 {int(o['s'])}s: \"{o['text'][:60]}\" — 발행 장면 없음 (선곡 불가)")
     return "\n".join(lines)

@@ -43,6 +43,8 @@ class ComposeState(TypedDict, total=False):
     total: int               # 채택분 컷 후 총 길이(초)
     endfix_moved: list[str]  # 경계 이동 기록 (리포트용 — bounds 가 채운다)
     suspicions: list[tuple]  # verify 소견 [(scene_id, 사유)] — 점수 낮은 건만
+    order: list[int]         # rank 가 준 우선순위 (scene_id) — select 가 그 순서로 담는다
+    zero_dropped: list       # 0점 제외분 [(scene_id, 사유)] — 리포트 합류용
     status: str              # ok | empty
     # --- 재배선(2026-08-20) 추가 ---
     phrases: list[str]       # expand 검색어 (없으면 원 질의 하나)

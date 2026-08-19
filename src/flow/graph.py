@@ -109,7 +109,8 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             prompts.plan_user(
                 st["query"], inv.game_line, inv.inventory_text, budget,
                 st.get("feedback", ""),
-                plan.render_evidence(st.get("evidence", []), []),   # orphan 은 프롬프트에서 뺀다
+                # orphan 은 프롬프트에서 뺀다 (선곡 불가라 자리만 차지)
+                plan.render_evidence(st.get("evidence", []), [], list(inv.scenes)),
             ),
             thinking=True, trace=st.get("trace"), name="plan",
         )
@@ -234,6 +235,63 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             tr.node("verify", scores=scores, incomplete=broken)
         return {"scores": scores}
 
+    def drop0_node(st: ComposeState) -> dict:
+        """verify 0점 제외 — 순수 필터. 필수 장면은 예외(사실이 소견을 이긴다).
+
+        rank 에 넘어가는 후보를 줄여 프롬프트를 짧게 하고, "무관한 클립으로 예산을
+        채우는" 경로를 select 이전에 끊는다.
+        """
+        scores = st.get("scores", {})
+        keep, cut_ = [], []
+        for c in st["clips"]:
+            zero = scores.get(c["scene_id"], {}).get("score", select_mod.DEFAULT_SCORE) <= \
+                select_mod.DROP_SCORE
+            (cut_ if zero and not select_mod.is_must(c) else keep).append(c)
+        if cut_:
+            log.info("0점 제외 %s", [c["scene_id"] for c in cut_])
+        if tr := st.get("trace"):
+            tr.node("drop0", kept=len(keep), zero=[c["scene_id"] for c in cut_])
+        return {"clips": keep, "zero_dropped": [(c["scene_id"], "질의와 무관(verify 0점)")
+                                                for c in cut_]}
+
+    async def rank_node(st: ComposeState) -> dict:
+        """남은 후보를 질의에 맞는 **순서**로 줄 세운다 (1콜 — 비교라 나눌 수 없다).
+
+        담을지 말지는 정하지 않는다. 순서만 받고 예산 합산·절단은 select 가 한다 —
+        예산 절단은 산술이고 LLM 은 산술을 못 한다(실측: 900초 요청에 947~1018초).
+        """
+        clips, spec = st["clips"], st["spec"]
+        scores = st.get("scores", {})
+        must = [c for c in clips if select_mod.is_must(c)]
+        rest = [c for c in clips if not select_mod.is_must(c)]
+        if not rest:
+            return {"order": []}
+        used = sum(r["cut"]["ce"] - r["cut"]["cs"] for r in must)
+        left = max(0, int(spec["budget"] - used))
+        # 필수층이 예산을 다 쓰면 순위를 매겨도 담길 자리가 없다 — 1~2분짜리 콜을
+        # 낭비하지 않는다 (v201 실측: 필수 16건 1103s > 예산 900s → 남은 0s).
+        if left < min(c["cut"]["ce"] - c["cut"]["cs"] for c in rest):
+            log.info("rank 생략: 남은 예산 %ds 로는 최단 후보도 못 담는다", left)
+            return {"order": []}
+        try:
+            text = await llm.chat(
+                prompts.RANK_SYSTEM,
+                prompts.rank_user(
+                    st["query"], st["inv"].game_line, left,
+                    sorted(must, key=lambda c: c["cut"]["cs"]),
+                    [(c, scores.get(c["scene_id"], {}).get("score",
+                                                           select_mod.DEFAULT_SCORE))
+                     for c in sorted(rest, key=lambda c: c["cut"]["cs"])]),
+                thinking=True, trace=st.get("trace"), name="rank")
+            order = select_mod.parse_order(text, {c["scene_id"] for c in rest})
+        except Exception as e:                       # noqa: BLE001 — 폴백이 있다
+            log.warning("rank 실패(점수순 폴백): %s", e)
+            order = []
+        log.info("rank: 후보 %d건 순서 %s", len(rest), order or "(폴백)")
+        if tr := st.get("trace"):
+            tr.node("rank", asked=len(rest), order=order, budget_left=left)
+        return {"order": order}
+
     def select_node(st: ComposeState) -> dict:
         """예산 확정 — 층 순서로 채우고, 마지막이라 예산이 정확하다."""
         spec = st["spec"]
@@ -242,7 +300,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             picked, spare = _assemble(clips, spec["budget"])
             total = sum(r["cut"]["ce"] - r["cut"]["cs"] for r in picked)
             return {"picked": picked, "spare": spare, "total": int(total), "status": "ok"}
-        picked, dropped, total = select_mod.choose(clips, spec, scores)
+        picked, dropped, total = select_mod.choose(clips, spec, scores, st.get("order"))
         if not picked:
             picked = select_mod.rescue_longest(clips, spec["budget"])
             total = int(sum(r["cut"]["ce"] - r["cut"]["cs"] for r in picked))
@@ -253,7 +311,8 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
                     dropped=[(c["scene_id"], why) for c, why in dropped])
         return {
             "picked": picked, "total": total, "status": "ok" if picked else "empty",
-            "dropped": [(c["scene_id"], why) for c, why in dropped],
+            "dropped": (st.get("zero_dropped") or [])
+                       + [(c["scene_id"], why) for c, why in dropped],
             "suspicions": [(i, v["reason"]) for i, v in scores.items() if v["score"] <= 1],
         }
 
@@ -268,6 +327,8 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
     g.add_node("feedback", feedback_node)
     g.add_node("bounds", bounds_node)
     g.add_node("verify", verify_node)
+    g.add_node("drop0", drop0_node)
+    g.add_node("rank", rank_node)
     g.add_node("select", select_node)
     g.add_node("empty", empty_node)
     g.add_edge(START, "expand")
@@ -278,7 +339,9 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         "cut", route, {"feedback": "feedback", "bounds": "bounds", "empty": "empty"})
     g.add_edge("feedback", "plan")
     g.add_edge("bounds", "verify")
-    g.add_edge("verify", "select")
+    g.add_edge("verify", "drop0")
+    g.add_edge("drop0", "rank")
+    g.add_edge("rank", "select")
     g.add_edge("select", END)
     g.add_edge("empty", END)
     return g.compile()
@@ -340,9 +403,15 @@ def _group_hits(hits: list[dict]) -> tuple[list[dict], list[dict]]:
         if sid < 0:
             orphan.append(h)
             continue
-        g = groups.setdefault(sid, {"scene_id": sid, "hits": 0, "sim": 0.0, "snippets": []})
+        g = groups.setdefault(sid, {"scene_id": sid, "hits": 0, "sim": 0.0,
+                                    "snippets": [], "by_kind": {}})
         g["hits"] += 1
         g["sim"] = max(g["sim"], h["distance"])
+        # 종류별로 최소 1건씩 확보한다 — 유사도 순으로만 자르면 한 종류가 자리를
+        # 다 먹는다 (v201 comp9 실측: 후보 8장면 전부 화면 캡션, 해설이 전멸).
+        # 캡션은 서로 구별이 안 되는데("야수들이 타구를 향해 움직이는 장면"류가 다섯
+        # 장면에 동일) 해설은 "펜스를 직격하는 적시타"처럼 장면을 특정한다.
+        g["by_kind"].setdefault(h.get("kind") or "?", []).append(h["text"])
         if len(g["snippets"]) < EVIDENCE_SNIPPETS_MAX:
             g["snippets"].append(h["text"])
     ev = sorted(groups.values(), key=lambda g: (-g["hits"], -g["sim"]))[:EVIDENCE_SCENES_MAX]

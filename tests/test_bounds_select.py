@@ -74,15 +74,43 @@ SPEC = {"mode": "collection", "targets": ["안타"], "view": "전체", "budget":
 
 
 def test_must_layer_survives_zero_score():
-    """필수 장면은 verify 0점이어도 유지 — 사실이 소견을 이긴다."""
+    """필수 장면은 verify 0점이어도 필수층에 담긴다 — 사실이 소견을 이긴다.
+
+    0점 일반 클립을 빼는 건 이제 drop0 노드 몫이라 여기서는 검사하지 않는다
+    (select 는 넘어온 것만 순서대로 담는다).
+    """
     must = clip(1, 0, 30, tags="안타", labels="역전", delta=1)
-    plain = clip(2, 40, 60, tags="범타", delta=0)
     picked, _dropped, total = select.choose(
-        [must, plain], SPEC, {1: {"score": 0, "complete": True, "reason": ""},
-                              2: {"score": 0, "complete": True, "reason": ""}})
-    ids = [c["scene_id"] for c in picked]
-    assert 1 in ids and 2 not in ids
+        [must], SPEC, {1: {"score": 0, "complete": True, "reason": ""}})
+    assert [c["scene_id"] for c in picked] == [1]
     assert total == 30
+
+
+def test_llm_order_drives_fill():
+    """rank 가 준 순서대로 담는다 — 점수가 낮아도 순위가 앞서면 먼저다."""
+    clips = [clip(1, 0, 40, tags="범타", delta=0, inning="1회 초"),
+             clip(2, 100, 140, tags="범타", delta=0, inning="2회 초"),
+             clip(3, 200, 240, tags="범타", delta=0, inning="3회 초")]
+    scores = {1: {"score": 3, "complete": True, "reason": ""},
+              2: {"score": 1, "complete": True, "reason": ""},
+              3: {"score": 3, "complete": True, "reason": ""}}
+    picked, _d, _t = select.choose(clips, {**SPEC, "budget": 80}, scores, order=[2, 3, 1])
+    assert [c["scene_id"] for c in picked] == [2, 3]      # 1점짜리 2번이 먼저
+
+
+def test_order_missing_ids_go_last():
+    """순위에 없는 클립은 버리지 않고 뒤로 — 모델이 빠뜨린 것이지 빼라는 뜻이 아니다."""
+    clips = [clip(i, i * 100, i * 100 + 40, tags="범타", delta=0) for i in (1, 2, 3)]
+    # 40s × 3, 예산 80 → 두 건만 들어간다. 순위에 3만 있으면 3이 먼저 담긴다.
+    picked, dropped, _t = select.choose(clips, {**SPEC, "budget": 80}, {}, order=[3])
+    assert 3 in [c["scene_id"] for c in picked]
+    assert len(picked) == 2 and len(dropped) == 1
+
+
+def test_parse_order_keeps_valid_only():
+    """실존 번호만, 중복 없이, 나온 순서대로."""
+    got = select.parse_order("순서: 15, 3, 99, 15, 31", {3, 15, 31})
+    assert got == [15, 3, 31]
 
 
 def test_budget_is_never_exceeded():
@@ -93,13 +121,13 @@ def test_budget_is_never_exceeded():
     assert sum(c["cut"]["ce"] - c["cut"]["cs"] for c in picked) == total
 
 
-def test_coverage_layer_spreads_innings():
-    """collection 이면 이닝별 대표를 먼저 채운다."""
-    clips = [clip(1, 0, 10, tags="범타", delta=0, inning="1회 초"),
-             clip(2, 20, 30, tags="범타", delta=0, inning="1회 초"),
-             clip(3, 40, 50, tags="범타", delta=0, inning="2회 초")]
-    picked, _d, _t = select.choose(clips, {**SPEC, "targets": [], "budget": 20}, {})
-    assert {c["inning"] for c in picked} == {"1회 초", "2회 초"}
+def test_score_order_is_fallback_without_llm_order():
+    """rank 가 실패하면 점수순으로 채운다 — 콜 하나가 편성을 죽이지 않는다."""
+    clips = [clip(1, 0, 10, tags="범타", delta=0), clip(2, 20, 30, tags="범타", delta=0)]
+    scores = {1: {"score": 1, "complete": True, "reason": ""},
+              2: {"score": 3, "complete": True, "reason": ""}}
+    picked, _d, _t = select.choose(clips, {**SPEC, "budget": 10}, scores, order=None)
+    assert [c["scene_id"] for c in picked] == [2]
 
 
 def test_must_scenes_exceed_budget_on_purpose():
