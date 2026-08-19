@@ -37,7 +37,7 @@ from langgraph.graph import END, START, StateGraph
 from flow import bounds as bounds_mod
 from flow import cut, plan, prompts, rank, vocab
 from flow import select as select_mod
-from flow.llm import MAX_TOKENS_PICK, ChatLLM
+from flow.llm import ChatLLM
 from flow.state import ComposeState, Inventory
 from log import get_logger
 from vector.embedder import Embedder
@@ -176,8 +176,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             try:
                 return await llm.chat(
                     prompts.BOUNDS_SYSTEM, prompts.bounds_user([row]), thinking=True,
-                    trace=st.get("trace"), name=f"bounds[{row['scene_id']}]",
-                    think_max=MAX_TOKENS_PICK)
+                    trace=st.get("trace"), name=f"bounds[{row['scene_id']}]")
             except Exception as e:                   # noqa: BLE001 — 건별 격리
                 log.warning("bounds 실패(장면%d 경계 유지): %s", row["scene_id"], e)
                 return ""
@@ -211,7 +210,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
                     prompts.VERIFY_SYSTEM,
                     prompts.verify_user(spec_line, _packets(st["inv"], [c])),
                     thinking=True, trace=st.get("trace"),
-                    name=f"verify[{c['scene_id']}]", think_max=MAX_TOKENS_PICK,
+                    name=f"verify[{c['scene_id']}]",
                 )
                 got = plan.parse_verify(text)
                 sid = c["scene_id"]

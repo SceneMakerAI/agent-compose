@@ -136,23 +136,31 @@ def expand_user(query: str) -> str:
 # 시작과 끝을 따로 물으면 서로를 모른다 — 시작을 25초 당기면 끝의 여유도 달라진다.
 # 후보는 결정적으로 만들고 LLM 은 **고르기만** 한다 (검증기가 제시 목록 밖을 기각).
 BOUNDS_SYSTEM = """\
-당신은 야구 하이라이트 클립의 경계 검수자다. 각 클립마다 제시된 시작·끝 후보 중에서
+당신은 야구 하이라이트 클립의 경계 검수자다. 제시된 시작·끝 후보 중에서
 그 플레이를 가장 잘 담는 조합을 고른다.
+
+[후보 읽는 법]
+- 후보마다 그 시각의 화면과 해설이 함께 적혀 있다. 시각을 따로 맞출 필요 없이
+  그 자리에서 판단하면 된다.
+- 맨 위 '현재'는 지금 클립이 시작하는 지점과 그 시각의 화면·해설이다.
 
 [시작 고르는 법]
 - 원칙은 **그 플레이를 만든 투구부터** 시작하는 것이다 — 투구·타격 없이 주자가 뛰는
   장면부터 시작하면 무슨 일이 일어났는지 알 수 없다.
+- 현재 시작이 이미 투구 지점이면 "유지"다 (화면이 '투구'라고 적혀 있으면 그렇다).
+- 시작 후보에는 현재 시작과의 간격이 적혀 있다. 간격이 크면 앞선 타석의 투구일 수
+  있다 — 그 시각 해설이 이 플레이를 말하고 있는지로 판별한다
+  ("다시 파울입니다" 처럼 앞선 투구를 말하고 있으면 그 후보는 버린다).
 - 투구 후보가 없으면 타구·수비가 시작되는 지점을 고른다.
-- 현재 시작이 이미 투구 직전이면 "유지".
 
 [끝 고르는 법]
 - 결과가 확정되고 그 결과를 설명하는 해설이 끝나는 지점.
-- 발화 끝과 화면 전환이 함께 오는 후보가 있으면 그쪽이 낫다 (표시돼 있다).
+- 후보의 해설이 문장 도중이면 그 지점은 이르다. 문장이 끝나는 후보를 고른다.
 - 다음 타석 준비·광고까지 끌고 가지 않는다.
 
 [RULES]
 - 반드시 제시된 후보의 초 값 중 하나를 쓴다. 임의의 초를 지어내지 않는다.
-- 애매하면 "유지".
+- 제시된 후보가 전부 부적절하면 "유지"를 고른다. 억지로 고르지 않는다.
 
 [OUTPUT — 클립마다 한 줄, 다른 말 금지]
 장면 <번호>: 시작 <유지|초> 끝 <유지|초>\
@@ -160,18 +168,38 @@ BOUNDS_SYSTEM = """\
 
 
 def bounds_user(rows: list[dict]) -> str:
-    """rows = [{scene_id, tags, cs, ce, starts:[(초,설명)], ends:[(초,설명)]}]."""
+    """rows = build_rows() 산출 — 후보마다 그 시각의 화면·해설이 붙어 있다."""
     blocks = []
     for r in rows:
-        head = (f"■ 장면 {r['scene_id']} [{','.join(r['tags'])}] "
-                f"— 현재 {r['cs']:.0f}~{r['ce']:.0f}s")
-        lines = [head]
-        lines += ([f"  시작후보 {sec:.0f}s — {why}" for sec, why in r["starts"]]
-                  or ["  시작후보 (없음)"])
-        lines += ([f"  끝후보  {sec:.0f}s — {why}" for sec, why in r["ends"]]
-                  or ["  끝후보  (없음)"])
+        head = (f"■ 장면 {r['scene_id']} [{','.join(r['tags'])}]"
+                + (f" {r['inning']}" if r.get("inning") else "")
+                + f" — 현재 {r['cs']:.0f}~{r['ce']:.0f}s ({r['ce'] - r['cs']:.0f}s)")
+        lines = [head, *_cand_lines("현재", r["cs"], r["cur"],
+                                    note="'" + r["cur"]["shot_type"] + "' 샷 시작"
+                                    if r["cur"].get("at_shot_start") else "")]
+        for c in r["starts"]:
+            lines += _cand_lines("시작후보", c["sec"], c,
+                                 note=f"{c['why']} ({c['gap']:.0f}초 앞)")
+        if not r["starts"]:
+            lines.append("  시작후보 (없음)")
+        for c in r["ends"]:
+            lines += _cand_lines("끝후보", c["sec"], c, note=c["why"])
+        if not r["ends"]:
+            lines.append("  끝후보 (없음)")
         blocks.append("\n".join(lines))
-    return "\n".join(blocks) + "\n\n[질문] 각 클립의 시작과 끝을 어디로 할까?"
+    return "\n\n".join(blocks) + "\n\n[질문] 시작과 끝을 어디로 할까?"
+
+
+def _cand_lines(label: str, sec: float, ctx: dict, note: str = "") -> list[str]:
+    """후보 1건 = 헤더 + 화면 + 해설. 값이 없는 줄은 아예 내지 않는다(빈 줄이 늘면
+    프롬프트만 길어지고 읽기가 나빠진다)."""
+    out = [f"  {label} {sec:.0f}s" + (f"  {note}" if note else "")]
+    if ctx.get("shot") or ctx.get("shot_type"):
+        out.append(f"     화면 [{ctx.get('shot_type') or '미분류'}] "
+                   f"{ctx.get('shot') or '(설명 없음)'}")
+    if ctx.get("utt"):
+        out.append(f"     해설 \"{ctx['utt'][:90]}\"")
+    return out
 
 
 # ── verify — 클립별 채점 (기각권 없음) ──────────────────────

@@ -68,6 +68,10 @@ def choose(clips: list[dict], spec: dict, scores: dict[int, dict]) -> tuple[list
 
     picked: list[dict] = []
     total = 0.0
+    # 처리 완료 = 채택됐거나 탈락했거나. 뒷 층은 여기 없는 것만 본다 — 탈락을 표시하지
+    # 않으면 ②에서 떨어진 클립을 ④가 또 보고 같은 사유로 다시 떨어뜨린다(실측 v201
+    # comp9: 탈락 24건이 실은 12건 × 2). 누적은 늘기만 하므로 앞 층에서 예산에 못 든
+    # 클립이 뒷 층에서 들어갈 일도 없다.
     taken: set[int] = set()
     dropped: list[tuple[dict, str]] = []
 
@@ -82,6 +86,10 @@ def choose(clips: list[dict], spec: dict, scores: dict[int, dict]) -> tuple[list
         log.debug("select 채택[%s] 장면%d %.0fs (누적 %.0f/%d)", why, c["scene_id"], d, total, budget)
         return True
 
+    def drop(c: dict, why: str) -> None:
+        taken.add(c["scene_id"])
+        dropped.append((c, why))
+
     # ① 필수 — 사실이 보증하는 장면. 점수 무관, 득점 큰 순.
     # **예산을 넘겨서라도 담되 +30%까지** (방침 확정 2026-08-20): 득점 장면 누락은
     # 취향이 아니라 결함이라 예산 준수보다 우선한다. 다만 무한정 넘기면 요청한
@@ -92,11 +100,7 @@ def choose(clips: list[dict], spec: dict, scores: dict[int, dict]) -> tuple[list
                   key=lambda c: (-c["score_delta"], -rank.score(c)))
     for c in must:
         if total + _dur(c) > must_cap:
-            # taken 에 넣어 뒷 층에서 빼둔다 — 여기서 상한에 걸린 클립은 이미 누적이
-            # 예산을 넘긴 상태라 뒷 층 take() 도 통과할 수 없다. 안 빼면 같은 클립이
-            # 탈락 목록에 두 번 실린다.
-            taken.add(c["scene_id"])
-            dropped.append((c, f"필수지만 허용 상한 초과(+{MUST_BUDGET_SLACK:.0%})"))
+            drop(c, f"필수지만 허용 상한 초과(+{MUST_BUDGET_SLACK:.0%})")
             continue
         take(c, "필수", force=True)
     if total > budget:
@@ -110,9 +114,9 @@ def choose(clips: list[dict], spec: dict, scores: dict[int, dict]) -> tuple[list
                 and (targets & set(c["tags"]) or targets & set(c["label_list"]))]
         for c in sorted(rest, key=lambda c: (-_score(c, scores), -rank.score(c))):
             if _score(c, scores) <= DROP_SCORE:
-                dropped.append((c, "질의와 무관(verify 0점)"))
+                drop(c, "질의와 무관(verify 0점)")
             elif not take(c, "질의"):
-                dropped.append((c, "예산 초과"))
+                drop(c, "예산 초과")
 
     # ③ 커버 — 이닝별 대표 1건씩. 빈 이닝을 억지로 채우지는 않는다(후보가 있을 때만).
     if collection:
@@ -123,15 +127,15 @@ def choose(clips: list[dict], spec: dict, scores: dict[int, dict]) -> tuple[list
         for inn in sorted(by_inn):
             best = max(by_inn[inn], key=lambda c: (_score(c, scores), rank.score(c)))
             if not take(best, f"커버{inn}"):
-                dropped.append((best, "예산 초과"))
+                drop(best, "예산 초과")
 
     # ④ 잔여 — 점수순.
     rest = [c for c in clips if c["scene_id"] not in taken]
     for c in sorted(rest, key=lambda c: (-_score(c, scores), -rank.score(c))):
         if _score(c, scores) <= DROP_SCORE:
-            dropped.append((c, "질의와 무관(verify 0점)"))
+            drop(c, "질의와 무관(verify 0점)")
         elif not take(c, "잔여"):
-            dropped.append((c, "예산 초과"))
+            drop(c, "예산 초과")
 
     picked.sort(key=lambda c: c["cut"]["cs"])        # 서사 = 시간순
     log.info("select: 채택 %d건 %.0fs/%ds (필수 %d · 탈락 %d)",

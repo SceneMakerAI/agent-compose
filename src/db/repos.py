@@ -122,11 +122,18 @@ class SourceRepo:
         """
         Summary:
             분할 샷 전량 (caption 유무 무관) — compose cut 레시피 재료.
+        Description:
+            summary 를 함께 싣는다. bounds·verify 가 "이 시각에 무슨 화면인가"를
+            프롬프트에 붙이는 재료다 — shot_type 만으로는 '타구·수비'가 그 플레이인지
+            앞 플레이 잔상인지 갈리지 않는다 (v201 장면9 실측: 첫 샷이 앞 타구의
+            "야수가 공을 쫓아 걷고 있다"인데 완결성 '정상' 판정을 받았다).
+            caption 없는 행도 유지 — 컷 레시피는 유형만 보므로 빼면 경계가 달라진다.
         Returns:
-            list[dict]: {s, e, shot_type} 시간순.
+            list[dict]: {s, e, shot_type, summary} 시간순.
         """
         sql = (
-            "SELECT TIME_TO_SEC(start_time) AS s, TIME_TO_SEC(end_time) AS e, shot_type "
+            "SELECT TIME_TO_SEC(start_time) AS s, TIME_TO_SEC(end_time) AS e, "
+            "       shot_type, summary "
             "FROM t_segment WHERE v_id = %s "
             "ORDER BY start_time"
         )

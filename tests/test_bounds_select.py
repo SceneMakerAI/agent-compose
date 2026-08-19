@@ -3,10 +3,11 @@
 from flow import bounds, select
 
 SEGS = [
-    {"s": 100.0, "e": 106.0, "shot_type": "리액션"},
-    {"s": 106.0, "e": 112.0, "shot_type": "투구"},
-    {"s": 112.0, "e": 120.0, "shot_type": "타구·수비"},
-    {"s": 120.0, "e": 128.0, "shot_type": "리액션"},
+    {"s": 100.0, "e": 106.0, "shot_type": "리액션", "summary": "타자가 타석에 들어선다"},
+    {"s": 106.0, "e": 112.0, "shot_type": "투구", "summary": "투수가 공을 던진다"},
+    {"s": 112.0, "e": 120.0, "shot_type": "타구·수비", "summary": "외야수가 타구를 쫓는다"},
+    {"s": 120.0, "e": 128.0, "shot_type": "리액션", "summary": "관중이 환호한다"},
+    {"s": 128.0, "e": 132.0, "shot_type": "광고", "summary": None},
 ]
 UTTS = [(118.0, 127.5, "넘어갑니다"), (130.0, 134.0, "다음 타석")]
 
@@ -62,7 +63,7 @@ def test_apply_rejects_values_outside_candidates():
 def test_apply_moves_when_candidate_matches():
     c = clip(cs=115.0, ce=120.0)
     rows = bounds.build_rows([c], SEGS, UTTS, {})
-    start = int(rows[0]["starts"][0][0])
+    start = int(rows[0]["starts"][0]["sec"])
     moved = bounds.apply([c], rows, f"장면 1: 시작 {start} 끝 유지")
     assert c["cut"]["cs"] == float(start) and moved
 
@@ -141,3 +142,57 @@ def test_backfill_note_explains_no_op():
     assert "관점" in select.backfill_note({**SPEC, "view": "홈"})
     assert "대상" in select.backfill_note({**SPEC, "targets": []})
     assert select.backfill_note(SPEC) == ""
+
+
+def test_dropped_has_no_duplicates():
+    """한 클립은 탈락 목록에 한 번만 — 층을 지날 때마다 다시 떨어뜨리지 않는다.
+
+    실측(v201 comp9): 탈락 24건이 실은 12건 × 2였다. ②질의층에서 예산에 못 든 클립을
+    ④잔여층이 또 보고 같은 사유로 다시 실었다. 리포트가 실제보다 두 배로 부풀었다.
+    """
+    clips = [clip(1, 0, 60, tags="안타", delta=1),
+             *(clip(i, i * 200, i * 200 + 50, tags="안타", delta=0) for i in range(2, 7))]
+    _picked, dropped, _t = select.choose(clips, {**SPEC, "budget": 100}, {})
+    ids = [c["scene_id"] for c, _why in dropped]
+    assert len(ids) == len(set(ids)), f"중복 탈락: {ids}"
+
+
+def test_end_candidates_keep_speech_over_screen_when_truncating():
+    """상한에 걸리면 화면 전환을 버리고 발화 끝을 남긴다.
+
+    실측(v201 장면5): 시간순으로 자르니 앞쪽 화면 전환 넷이 자리를 다 먹고 유일한
+    정답인 발화 끝 1365s 가 버려졌다. 규칙은 "해설이 끝나는 지점"인데 고를 수가 없었다.
+    """
+    segs = [{"s": 120.0 + i, "e": 121.0 + i, "shot_type": "리액션", "summary": ""}
+            for i in range(6)]                       # 끝 121·122·123·124·125·126
+    utts = [(118.0, 130.0, "결국에 이겨내네요")]      # 발화 끝 130 — 시간순이면 꼴찌
+    got = bounds.end_candidates(clip(ce=120.0), segs, utts)
+    assert 130 in [int(sec) for sec, _ in got], got
+    assert len(got) <= bounds.CAND_MAX
+
+
+def test_end_candidates_skip_ad_boundary():
+    """광고 경계는 끝 후보가 아니다 — 중계가 아닌 데서 끊긴다."""
+    segs = [{"s": 120.0, "e": 122.0, "shot_type": "광고", "summary": None},
+            {"s": 122.0, "e": 124.0, "shot_type": "리액션", "summary": ""}]
+    got = bounds.end_candidates(clip(ce=119.0), segs, [])
+    assert 122 not in [int(sec) for sec, _ in got]
+    assert 124 in [int(sec) for sec, _ in got]
+
+
+def test_build_rows_marks_current_start_is_pitch():
+    """현재 시작이 이미 투구 샷이면 그렇게 표시한다 — 규칙에 있는데 재료가 없었다."""
+    c = clip(cs=106.0, ce=120.0)
+    rows = bounds.build_rows([c], SEGS, UTTS, {})
+    assert rows[0]["cur"]["at_shot_start"] is True
+    assert rows[0]["cur"]["shot_type"] == "투구"
+
+
+def test_bounds_user_attaches_narrative_per_candidate():
+    """후보 밑에 그 시각의 화면·해설이 붙는다 — 따로 주면 모델이 조인해야 한다."""
+    from flow.prompts import bounds_user
+
+    rows = bounds.build_rows([clip(cs=115.0, ce=120.0)], SEGS, UTTS, {})
+    text = bounds_user(rows)
+    assert "화면 [투구] 투수가 공을 던진다" in text
+    assert "해설" in text

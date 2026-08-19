@@ -32,6 +32,57 @@ END_MAX_EXT_SEC = 12
 CAND_MAX = 4
 # 발화 끝과 샷 경계가 이 안에 함께 오면 "둘 다"로 표시한다 (가장 깔끔한 끝점).
 COINCIDE_SEC = 2.0
+# 후보로 쓰지 않는 샷 유형 — 광고 경계를 클립 끝으로 삼으면 중계가 아닌 데서 끊긴다.
+# (v201 장면5 실측: 끝 후보 넷 중 하나가 광고 경계였다.)
+SKIP_SHOT_TYPES = frozenset({"광고"})
+
+
+def _shot_at(sec: float, segs: list[dict], at_end: bool = False) -> dict | None:
+    """그 시각의 샷. at_end 면 **거기서 끝나는** 샷을 준다.
+
+    끝 후보에 다음 샷을 붙이면 문맥이 뒤집힌다 — v201 장면5 의 끝 후보 1359s 는
+    1357~1359 리액션이 끝나는 지점인데, 시작 기준으로 찾으면 그 뒤 광고가 잡혀
+    "화면 [광고]" 로 나왔다. 고르라는 건 끝나는 지점이지 시작하는 지점이 아니다.
+    """
+    if at_end:
+        for s in segs:
+            if abs(s["e"] - sec) < 1:
+                return s
+        return None
+    for s in segs:
+        if s["s"] <= sec < s["e"]:
+            return s
+    return None
+
+
+def _utt_at(sec: float, utts: list, window: float = 6.0, at_end: bool = False) -> str:
+    """그 시각의 해설. at_end 면 **거기서 끝나는** 발화를 우선한다.
+
+    끝 후보의 관심사는 "여기서 말이 끝나는가"다. 겹치는 발화를 주면 다음 문장이
+    잡혀 그 후보를 고를 근거가 사라진다.
+    """
+    if at_end:
+        ends = [t for _us, ue, t in utts if abs(math.ceil(ue) - sec) <= 1]
+        if ends:
+            return ends[-1]
+    over = [t for us, ue, t in utts if us <= sec < ue]
+    if over:
+        return over[-1]
+    prev = [t for _us, ue, t in utts if sec - window <= ue <= sec]
+    return prev[-1] if prev else ""
+
+
+def _ctx(sec: float, segs: list[dict], utts: list, at_end: bool = False) -> dict:
+    """후보 1건에 붙일 서사 — 그 시각의 화면과 해설.
+
+    후보·서사·해설을 따로 세 블록으로 주면 모델이 시각을 맞춰 조인해야 하고 그
+    조인이 사고를 태운다 (v201 장면5: thinking 59,501자·422초). 후보 밑에 바로
+    붙이면 각 줄이 자기완결적이라 비교만 하면 된다.
+    """
+    s = _shot_at(sec, segs, at_end) or (_shot_at(sec, segs) if at_end else None)
+    return {"shot_type": (s or {}).get("shot_type") or "",
+            "shot": (s or {}).get("summary") or "",
+            "utt": _utt_at(sec, utts, at_end=at_end)}
 
 
 def start_candidates(clip: dict, segs: list[dict], pitches: list[tuple[int, int]]) -> list:
@@ -60,18 +111,27 @@ def end_candidates(clip: dict, segs: list[dict], utts: list) -> list:
 
     둘이 COINCIDE_SEC 안에 겹치면 그렇게 표시한다: 말도 끝나고 화면도 바뀌는 지점이
     가장 깔끔한 끝점인데, 지금까지는 그 정보가 프롬프트에 없어 모델이 알 수 없었다.
+
+    **상한 절단은 시간순이 아니라 종류 우선**이다. 시간순으로 자르면 앞쪽에 몰린 화면
+    전환이 자리를 다 먹고 뒤쪽의 발화 끝이 잘려나간다 — v201 장면5 실측: 후보가
+    1355·1357·1359·1361(전부 화면 전환, 하나는 광고)만 남고 유일한 정답인 발화 끝
+    1365 가 버려졌다. 규칙은 "해설이 끝나는 지점"인데 그걸 고를 수가 없었다.
     """
     ce = clip["cut"]["ce"]
     hi = ce + END_MAX_EXT_SEC
     utt_ends = [math.ceil(ue) for _us, ue, _t in utts if ce < ue <= hi]
-    shot_ends = [s["e"] for s in segs if ce < s["e"] <= hi]
-    out: list[tuple[float, str]] = []
+    shot_ends = [s["e"] for s in segs
+                 if ce < s["e"] <= hi and s.get("shot_type") not in SKIP_SHOT_TYPES]
+    speech: list[tuple[float, str]] = []
+    screen: list[tuple[float, str]] = []
     for ue in utt_ends:
         near = any(abs(ue - se) <= COINCIDE_SEC for se in shot_ends)
-        out.append((float(ue), "발화 끝 + 화면 전환" if near else "발화 끝"))
+        speech.append((float(ue), "발화 끝 + 화면 전환" if near else "발화 끝"))
     for se in shot_ends:
         if not any(abs(ue - se) <= COINCIDE_SEC for ue in utt_ends):
-            out.append((float(se), "화면 전환"))
+            screen.append((float(se), "화면 전환"))
+    # 발화 끝을 먼저 채우고 남는 자리만 화면 전환으로 (개수는 CAND_MAX 그대로).
+    out = sorted(speech)[:CAND_MAX] + sorted(screen)[:max(0, CAND_MAX - len(speech))]
     uniq: dict[int, tuple[float, str]] = {}
     for sec, why in sorted(out):
         uniq.setdefault(int(sec), (sec, why))
@@ -80,15 +140,28 @@ def end_candidates(clip: dict, segs: list[dict], utts: list) -> list:
 
 def build_rows(clips: list[dict], segs: list[dict], utts: list,
                pitches_of: dict[int, list]) -> list[dict]:
-    """LLM 에 낼 행 — 후보가 하나도 없는 클립은 물어볼 게 없으므로 뺀다."""
+    """LLM 에 낼 행 — 후보가 하나도 없는 클립은 물어볼 게 없으므로 뺀다.
+
+    후보마다 그 시각의 화면·해설을 붙이고, **현재 시작이 무엇인지도** 함께 싣는다.
+    규칙에 "현재 시작이 이미 투구 직전이면 유지"가 있는데 후보는 cs 이전만 나열해서
+    모델이 확인할 방법이 없었다 (v201 장면5: cs=1342 가 이미 '투구' 샷 시작인데
+    28초 앞 앞선 타석 투구만 후보로 받았다).
+    """
     rows = []
     for c in clips:
-        starts = start_candidates(c, segs, pitches_of.get(c["scene_id"], []))
-        ends = end_candidates(c, segs, utts)
+        cs, ce = c["cut"]["cs"], c["cut"]["ce"]
+        starts = [{"sec": sec, "why": why, "gap": round(cs - sec),
+                   **_ctx(sec, segs, utts)}
+                  for sec, why in start_candidates(c, segs, pitches_of.get(c["scene_id"], []))]
+        ends = [{"sec": sec, "why": why, **_ctx(sec, segs, utts, at_end=True)}
+                for sec, why in end_candidates(c, segs, utts)]
         if starts or ends:
+            cur = _ctx(cs, segs, utts)
+            at_start = _shot_at(cs, segs)
+            cur["at_shot_start"] = bool(at_start and abs(at_start["s"] - cs) <= 1)
             rows.append({"scene_id": c["scene_id"], "tags": c["tags"],
-                         "cs": c["cut"]["cs"], "ce": c["cut"]["ce"],
-                         "starts": starts, "ends": ends})
+                         "inning": c.get("inning") or "", "cs": cs, "ce": ce,
+                         "cur": cur, "starts": starts, "ends": ends})
     return rows
 
 
@@ -111,14 +184,14 @@ def apply(clips: list[dict], rows: list[dict], text: str) -> list[str]:
         note = []
         if m.group(2) != "유지":
             new = int(m.group(2))
-            if any(int(sec) == new for sec, _ in row["starts"]):
+            if any(int(cand["sec"]) == new for cand in row["starts"]):
                 note.append(f"시작 {cut_['cs']:.0f}→{new}")
                 cut_["cs"] = float(new)
             else:
                 log.info("bounds 기각: 장면%d 시작 %s (후보 밖)", sid, new)
         if m.group(3) != "유지":
             new = int(m.group(3))
-            if any(int(sec) == new for sec, _ in row["ends"]):
+            if any(int(cand["sec"]) == new for cand in row["ends"]):
                 note.append(f"끝 {cut_['ce']:.0f}→{new}")
                 cut_["ce"] = float(new)
             else:

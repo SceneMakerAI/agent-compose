@@ -21,12 +21,11 @@ _THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 # 응답 상한 — thinking 은 사고+본문을 같이 소모하므로 크게 (bench4 운영값)
 MAX_TOKENS = 512
 MAX_TOKENS_THINK = 32768
-# 선택지가 좁은 판단(bounds·verify)용 상한. 전량이 동시에 출발해도 **가장 오래 생각하는
-# 한 콜이 배치 전체를 붙잡는다** — v201 comp9 실측: bounds 28콜 중앙값 2,781자인데
-# 한 콜이 59,501자·422초를 썼고, 그 1건이 노드 소요를 2분 30초에서 7분 3초로 늘렸다.
-# 6144 토큰 ≈ 19,000자(실측 3.1자/토큰)로 상위 4건(11~15k자)까지는 그대로 통과하고
-# 튄 1건만 잘린다. 잘려서 본문이 비면 thinking 을 끄고 재시도하므로 답은 나온다.
-MAX_TOKENS_PICK = 6144
+# thinking 상한을 노드별로 낮추지 않는다 (2026-08-20 판단 번복). 사고가 폭주하는 건
+# 모델이 게을러서가 아니라 **프롬프트가 결정 재료를 안 줘서**다 — v201 장면5 실측:
+# 끝 후보 4개가 전부 화면 전환(하나는 광고 경계)이고 유일한 발화 끝 후보는 정렬 절단에
+# 밀려 빠졌다. 상한을 씌우면 "제시된 후보가 다 틀렸다"는 옳은 결론에 닿기 전에 잘려
+# 아무거나 고른다. 증상이 아니라 후보 생성을 고친다.
 
 
 class ChatLLM:
@@ -44,7 +43,7 @@ class ChatLLM:
         self._gate = asyncio.Semaphore(settings.llm_concurrency)
 
     async def chat(self, system: str, user: str, thinking: bool = False,
-                   trace=None, name: str = "", think_max: int | None = None) -> str:
+                   trace=None, name: str = "") -> str:
         """
         Summary:
             시스템+유저 프롬프트로 1회 판정. thinking 은 호출자가 명시
@@ -52,8 +51,6 @@ class ChatLLM:
         Args:
             trace: Trace | None — 주면 프롬프트·응답·thinking 전문을 남긴다.
             name (str): 트레이스에 찍을 콜 이름 (plan·bounds·verify…).
-            think_max (int|None): thinking 응답 상한 — 생략하면 MAX_TOKENS_THINK.
-                팬아웃 노드는 MAX_TOKENS_PICK 을 줘 폭주 1건이 배치를 붙잡는 걸 막는다.
         Returns:
             str: <think> 제거된 본문. 본문이 비면 thinking 끄고 1회 재시도.
         """
@@ -66,7 +63,7 @@ class ChatLLM:
         async with self._gate:
             resp = await self._client.post("/chat/completions", json={
                 "model": self._model, "temperature": 0,
-                "max_tokens": (think_max or MAX_TOKENS_THINK) if use_think else MAX_TOKENS,
+                "max_tokens": MAX_TOKENS_THINK if use_think else MAX_TOKENS,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -84,10 +81,9 @@ class ChatLLM:
             trace.llm(name or "chat", system, user, text, thinking=think,
                       elapsed=time.monotonic() - started)
         if not text and use_think:
-            # 상한을 같이 남긴다 — 상한을 낮춘 뒤 이 경고가 잦아지면 값이 너무 빡빡하다는
-            # 신호다(품질 저하가 재시도로 조용히 흡수되므로 로그 말고는 드러나지 않는다).
-            log.warning("thinking 이 토큰을 소진해 본문 없음(%s, 상한 %d) — thinking 끄고 재시도",
-                        name or "chat", think_max or MAX_TOKENS_THINK)
+            # 콜 이름을 남긴다 — 어느 클립이 소진했는지 알아야 그 프롬프트를 고칠 수 있다.
+            log.warning("thinking 이 토큰을 소진해 본문 없음(%s) — thinking 끄고 재시도",
+                        name or "chat")
             return await self.chat(system, user, thinking=False, trace=trace,
                                    name=f"{name}:retry" if name else "retry")
         return text
