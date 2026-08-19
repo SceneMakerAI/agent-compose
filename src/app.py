@@ -53,7 +53,8 @@ async def lifespan(app: FastAPI):
     app.state.llm = ChatLLM(settings)
     app.state.render = RenderClient(settings)   # readyz 미포함 — GPU 야간 중지 오탐 회피
     # 그래프는 무상태 배선 — 프로세스당 1회 컴파일 (요청마다 재컴파일 금지)
-    app.state.graph = build_graph(app.state.llm, app.state.embedder, app.state.vector)
+    app.state.graph = build_graph(
+        app.state.llm, app.state.embedder, app.state.vector, settings)
 
     db_ok = await app.state.db.ping()
     embed_ok = await app.state.embedder.ready()

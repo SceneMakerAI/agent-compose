@@ -8,6 +8,8 @@ ID 가 어긋난다 (bench4 관례 계승). scene 시간은 start_ms/end_ms(밀�
 초 단위로 환산해 돌려준다. (테이블명 *_baseball 접미는 2026-08 DB 정리 리네임.)
 """
 
+import json
+
 from asyncmy.cursors import DictCursor
 
 from db.pool import Database
@@ -64,22 +66,37 @@ class SourceRepo:
             r["label_list"] = r["labels"].split(",") if r["labels"] else []
         return rows
 
-    async def fetch_etc(self, v_id: int) -> list[tuple[int, str]]:
+    async def fetch_pitch_windows(self, v_id: int) -> dict[int, list[tuple[int, int]]]:
         """
         Summary:
-            하단 자막 판독문(kind='ETC') 전량 — 장면별 타자 이름 재료.
+            장면별 투구 후보 구간 — bounds 의 시작 후보 재료.
         Returns:
-            list[tuple[int, str]]: (초, 자막) 시간순.
+            dict: {scene_id: [(시작초, 끝초), …]}.
         Description:
-            - 자막은 타석 준비 중에 뜨고 발행 장면은 플레이 순간만 담아 시간이 겹치지 않는다
-              (v201 실측 865건 중 겹침 18%) — 그래서 겹침이 아니라 장면 직전 구간에서 모은다.
-              판정은 flow.players 가 한다 (여기는 원문만 준다).
+            - t_transition_baseball.pitches 는 보드 검출이 찾은 투구 구간 목록이라
+              **샷 분류(shot_type)와 독립적인 재료**다. 장면 시작 이전은 분류가 비어 있는
+              경우가 많아(하이라이트 구간만 분류) 이쪽이 유일한 단서일 때가 있다.
+              v201 실측: 전이 293건 중 246건(84%)에 값이 있다.
         """
-        sql = ("SELECT idx_sec, txt FROM t_frame_baseball_board_detail "
-               "WHERE v_id = %s AND kind = 'ETC' AND txt <> '' ORDER BY idx_sec")
+        sql = (
+            "SELECT sc.scene_id, tr.pitches "
+            "FROM t_scene_baseball sc "
+            "JOIN t_play_baseball p ON p.v_id = sc.v_id AND p.h_id = sc.h_id "
+            "JOIN t_transition_baseball tr ON tr.v_id = sc.v_id AND tr.sec = p.board_sec "
+            "WHERE sc.v_id = %s AND sc.source = 'board' AND tr.pitches IS NOT NULL"
+        )
+        out: dict[int, list[tuple[int, int]]] = {}
         async with self._db.acquire() as conn, conn.cursor(cursor=DictCursor) as cur:
             await cur.execute(sql, (v_id,))
-            return [(int(r["idx_sec"]), r["txt"]) for r in await cur.fetchall()]
+            for r in await cur.fetchall():
+                try:
+                    wins = json.loads(r["pitches"])
+                except (TypeError, ValueError):
+                    continue                      # 형식이 깨진 행은 조용히 건너뛴다
+                out[r["scene_id"]] = [
+                    (int(w[0]), int(w[1])) for w in wins if isinstance(w, list) and len(w) == 2
+                ]
+        return out
 
     async def fetch_shots(self, v_id: int) -> list[dict]:
         """

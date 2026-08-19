@@ -99,35 +99,41 @@ def spec_line(spec: dict) -> str:
             f"대상={','.join(spec['targets']) or '-'} 예산={spec['budget']}s")
 
 
-def parse_verify(text: str) -> tuple[list[int], dict[int, str], str]:
-    """verify 응답 → (의심 scene_id, 장면별 사유, 공통 사유). 파싱 실패 = 의심 없음.
 
-    A2 수정: 사유를 "장면 N: 한 줄" 로 클립별 매핑 — bench4 는 마지막 사유 한 줄을
-    전 의심 클립에 복사했다. 매핑 안 되는 사유 줄은 공통 소견으로 강등.
-    """
-    if not text.strip().startswith("판정"):
-        log.warning("verify 형식 밖 응답 — 기각 없음 처리")
-        return [], {}, ""
-    rejected: list[int] = []
-    per: dict[int, str] = {}
-    common: list[str] = []
-    in_reason = False
+# ── expand / verify 파서 (신설) ───────────────────────────
+
+def parse_expand(text: str) -> tuple[list[str], list[str]]:
+    """expand 응답 → (검색어, 필터). 형식이 깨지면 빈 값 — 호출부가 원 질의로 폴백한다."""
+    phrases: list[str] = []
+    filters: list[str] = []
     for line in text.splitlines():
         line = line.strip()
-        if line.startswith("기각:"):
-            in_reason = False
-            if "없음" not in line:
-                rejected = [int(x) for x in re.findall(r"\d+", line)]
-        elif line.startswith("사유:"):
-            in_reason = True
-            line = line[3:].strip()
-            if not line or line == "없음":
-                continue
-        elif not in_reason:
+        if line.startswith("검색어:"):
+            phrases = [p.strip() for p in line[4:].split(",") if p.strip()]
+        elif line.startswith("필터:"):
+            body = line[3:].strip()
+            if body and body != "없음":
+                filters = [f.strip() for f in body.split(",") if f.strip()]
+    return phrases[:4], filters
+
+
+_SCORE_LINE = re.compile(r"장면\s*(\d+)\s*[:：]\s*([0-3])\s*(정상|문제)?\s*(.*)")
+
+
+def parse_verify(text: str) -> dict[int, dict]:
+    """verify 응답 → {scene_id: {score, complete, reason}}.
+
+    기각권이 없으므로 '무엇을 뺄까'가 아니라 '얼마나 맞나'만 읽는다. 파싱 실패한 줄은
+    버린다 — 점수가 없는 클립은 select 가 기본값으로 다룬다(빠지지 않는다).
+    """
+    out: dict[int, dict] = {}
+    for line in text.splitlines():
+        m = _SCORE_LINE.search(line.strip())
+        if not m:
             continue
-        m = re.match(r"장면\s*(\d+)\s*[:：]\s*(.+)", line)
-        if m:
-            per[int(m.group(1))] = m.group(2).strip()
-        elif line and line != "없음":
-            common.append(line)
-    return rejected, per, " ".join(common)
+        out[int(m.group(1))] = {
+            "score": int(m.group(2)),
+            "complete": (m.group(3) or "정상") == "정상",
+            "reason": m.group(4).strip(),
+        }
+    return out

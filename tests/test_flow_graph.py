@@ -5,11 +5,13 @@ from flow.state import Inventory
 
 
 class StubLLM:
-    def __init__(self, answers):
-        self.answers = list(answers)
+    """콜 이름별 응답 스텁 — 노드가 늘어도 순서에 의존하지 않는다."""
 
-    async def chat(self, system, user, thinking=False):
-        return self.answers.pop(0)
+    def __init__(self, by_name: dict | None = None, **kw):
+        self.by_name = dict(by_name or {}, **kw)
+
+    async def chat(self, system, user, thinking=False, trace=None, name=""):
+        return self.by_name.get(name, DEFAULTS.get(name, ""))
 
 
 class StubEmb:
@@ -18,7 +20,7 @@ class StubEmb:
 
 
 class StubStore:
-    async def search(self, qv, v_id):
+    async def search(self, qv, v_id, extra=None):
         return []
 
 
@@ -40,44 +42,77 @@ INV = Inventory(v_id=999, scenes=SCENES, segs=SEGS, utts=(),
 
 PLAN_OK = "모드: collection\n대상: 안타\n관점: 전체\n예산: 60\n선곡: 1, 2\n사유: 테스트"
 PLAN_EMPTY = "모드: collection\n대상: 홈런\n관점: 전체\n예산: 60\n선곡: 없음\n사유: 없음"
-VERIFY_OK = "판정: ok\n기각: 없음\n사유: 없음"
+VERIFY_OK = "장면 1: 3 정상 근거\n장면 2: 3 정상 근거"
+EXPAND_OK = "검색어: 안타, 적시타\n필터: 안타"
+DEFAULTS = {"expand": EXPAND_OK, "plan": PLAN_OK, "bounds": "", "verify": VERIFY_OK}
 
 
 async def test_happy_path():
-    g = build_graph(StubLLM([PLAN_OK, VERIFY_OK]), StubEmb(), StubStore())
+    g = build_graph(StubLLM(), StubEmb(), StubStore())
     st = await run_compose(g, INV, "안타 모음", None)
     assert st["status"] == "ok" and [r["scene_id"] for r in st["picked"]] == [1, 2]
 
 
 async def test_empty_after_replan():
-    g = build_graph(StubLLM([PLAN_EMPTY, PLAN_EMPTY]), StubEmb(), StubStore())
+    g = build_graph(StubLLM(plan=PLAN_EMPTY), StubEmb(), StubStore())
     st = await run_compose(g, INV, "홈런 모음", None)
     assert st["status"] == "empty" and st["picked"] == []
 
 
-async def test_backfill_then_endfix_and_perclip_suspicion():
-    """A1: backfill 충원분도 endfix 노드를 지난다 / A2: 클립별 사유 / A3: total 갱신."""
-    plan_underfill = ("모드: collection\n대상: 안타,범타\n관점: 전체\n예산: 300\n"
-                      "선곡: 1\n사유: 미달 유도")
-    verify_perclip = "판정: ok\n기각: 2\n사유: 장면 2: 관점 위반 테스트"
-    g = build_graph(StubLLM([plan_underfill, verify_perclip]), StubEmb(), StubStore())
-    st = await run_compose(g, INV, "길게", 300)
-    assert [r["scene_id"] for r in st["picked"]] == [1, 2]          # backfill 충원
-    assert st["total"] == sum(r["cut"]["ce"] - r["cut"]["cs"] for r in st["picked"])  # A3
-    assert st["suspicions"] == [(2, "관점 위반 테스트")]              # A2
-    assert all("cut" not in s for s in SCENES)                       # B4 인벤토리 불변
+async def test_must_scene_recovered_when_plan_misses_it():
+    """plan 이 놓친 득점 장면을 필수층이 회수한다.
+
+    선곡분만 컷하면 plan 이 빠뜨린 장면은 영영 들어올 수 없어 select 의 필수층이
+    무의미해진다 (구 backfill 이 하던 회수).
+    """
+    scenes = (scene(1, 100, 130, pitch=102),
+              scene(2, 200, 240, tags="안타", labels="역전,적시타", delta=1, pitch=202))
+    inv = Inventory(v_id=999, scenes=scenes, segs=SEGS, utts=(),
+                    game_line="g", inventory_text="(목록)")
+    plan_one = "모드: collection\n대상: 안타\n관점: 전체\n예산: 300\n선곡: 1\n사유: 2번 누락"
+    g = build_graph(StubLLM(plan=plan_one), StubEmb(), StubStore())
+    st = await run_compose(g, inv, "안타 모음", 300)
+    assert [r["scene_id"] for r in st["picked"]] == [1, 2]
+    assert all("cut" not in s for s in scenes)              # B4 인벤토리 불변
+
+
+async def test_verify_score_drives_drop_not_removal():
+    """0점은 빼되 필수 장면은 유지한다 — 사실이 소견을 이긴다."""
+    scenes = (scene(1, 100, 130, tags="범타"),
+              scene(2, 200, 240, tags="안타", labels="역전", delta=1, pitch=202))
+    inv = Inventory(v_id=999, scenes=scenes, segs=SEGS, utts=(),
+                    game_line="g", inventory_text="(목록)")
+    plan_two = "모드: collection\n대상: 안타\n관점: 전체\n예산: 300\n선곡: 1, 2\n사유: t"
+    zero_both = "장면 1: 0 정상 무관\n장면 2: 0 정상 무관"
+    g = build_graph(StubLLM(plan=plan_two, verify=zero_both), StubEmb(), StubStore())
+    st = await run_compose(g, inv, "안타 모음", 300)
+    ids = [r["scene_id"] for r in st["picked"]]
+    assert 2 in ids                                        # 필수(역전·득점) 는 0점이어도 유지
+    assert 1 not in ids                                    # 0점 일반 클립은 제외
+    assert any(sid == 1 for sid, _ in st["dropped"])
+
+
+async def test_budget_is_exact_after_bounds():
+    """경계 보정이 끝난 뒤 자르므로 총 길이가 예산을 넘지 않는다."""
+    g = build_graph(StubLLM(), StubEmb(), StubStore())
+    st = await run_compose(g, INV, "안타 모음", 40)
+    assert st["total"] <= 40
 
 
 class CapturingLLM(StubLLM):
     """system/user 프롬프트를 보존하는 스텁 — 배선 검증용."""
 
-    def __init__(self, answers):
-        super().__init__(answers)
-        self.calls: list[tuple[str, str]] = []
+    def __init__(self, by_name: dict | None = None, **kw):
+        super().__init__(by_name, **kw)
+        self.calls: list[tuple[str, str, str]] = []
 
-    async def chat(self, system, user, thinking=False):
-        self.calls.append((system, user))
-        return await super().chat(system, user, thinking)
+    async def chat(self, system, user, thinking=False, trace=None, name=""):
+        self.calls.append((system, user, name))
+        return await super().chat(system, user, thinking, trace, name)
+
+    def prompt_of(self, call: str) -> tuple[str, str]:
+        """해당 콜의 (system, user) — 노드 순서가 바뀌어도 이름으로 찾는다."""
+        return next((s, u) for s, u, n in self.calls if n == call)
 
 
 async def test_caller_budget_reaches_plan_prompt():
@@ -87,10 +122,10 @@ async def test_caller_budget_reaches_plan_prompt():
     전제로 선곡했다 (2026-08-19 실측). 프롬프트 문자열까지 확인해야 잡히는 종류라
     응답 파싱이 아니라 송신 내용을 본다.
     """
-    llm = CapturingLLM([PLAN_OK, VERIFY_OK])
+    llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), StubStore())
     await run_compose(g, INV, "안타 모음", 900)
-    plan_system = llm.calls[0][0]
+    plan_system, _ = llm.prompt_of("plan")
     assert "900" in plan_system
     assert "{budget}" not in plan_system            # 치환 누락 방지
     assert str(180) not in plan_system.split("예산(초)이")[1][:80]   # 기본값 잔존 금지
@@ -100,10 +135,10 @@ async def test_budget_omitted_falls_back_to_default():
     """예산 미지정이면 기본값이 그대로 프롬프트에 실린다."""
     from flow import plan as plan_mod
 
-    llm = CapturingLLM([PLAN_OK, VERIFY_OK])
+    llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), StubStore())
     await run_compose(g, INV, "안타 모음", None)
-    assert str(plan_mod.DEFAULT_BUDGET_SEC) in llm.calls[0][0]
+    assert str(plan_mod.DEFAULT_BUDGET_SEC) in llm.prompt_of("plan")[0]
 
 
 # ── 인벤토리 상황 렌더 ─────────────────────────────────

@@ -66,6 +66,16 @@ class Settings(BaseSettings):
     # --- 로깅 ---
     log_level: str = "INFO"
     log_path: str | None = None
+    # 편성 1건 = JSON 1개 (노드 입출력·LLM 프롬프트 전문). 빈 값이면 수집 자체를 안 한다.
+    # 전역 DEBUG 는 plan user 프롬프트만 5,883자(v201)라 운영 로그를 덮는다.
+    trace_dir: str | None = None
+
+    # --- 개선 단계 스위치 ---
+    # 여러 변경을 한꺼번에 넣으면 트레이스로 "무엇이 달라졌나"는 봐도 "어느 변경 때문인가"는
+    # 갈리지 않는다. 코드 변경 없이 하나씩 꺼가며 원인을 좁히려고 둔다.
+    use_expand: bool = True             # 질의 재작성 + 메타 필터 힌트
+    use_bounds: bool = True             # 시작·끝 통합 보정 (구 endfix)
+    use_select: bool = True             # 층 구조 예산 확정 (구 cutrank 절단 + backfill)
 
     @field_validator("llm_base_url", "embed_base_url", "milvus_uri", "render_base_url")
     @classmethod

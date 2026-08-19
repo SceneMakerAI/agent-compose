@@ -6,6 +6,7 @@ LLM 출력은 항상 줄 형식 — JSON 강제는 금지 (bench4 실측 확정:
 """
 
 import re
+import time
 
 import httpx
 
@@ -34,15 +35,20 @@ class ChatLLM:
         self._model = settings.llm_model
         self._thinking_enabled = settings.llm_thinking
 
-    async def chat(self, system: str, user: str, thinking: bool = False) -> str:
+    async def chat(self, system: str, user: str, thinking: bool = False,
+                   trace=None, name: str = "") -> str:
         """
         Summary:
             시스템+유저 프롬프트로 1회 판정. thinking 은 호출자가 명시
             (그래프 3콜 전부 True — .env llm_thinking=0 으로 일괄 비활성 가능).
+        Args:
+            trace: Trace | None — 주면 프롬프트·응답·thinking 전문을 남긴다.
+            name (str): 트레이스에 찍을 콜 이름 (plan·bounds·verify…).
         Returns:
             str: <think> 제거된 본문. 본문이 비면 thinking 끄고 1회 재시도.
         """
         use_think = thinking and self._thinking_enabled
+        started = time.monotonic()
         log.debug("LLM 요청 system(%d자):\n%s", len(system), system)
         log.debug("LLM 요청 user(%d자):\n%s", len(user), user)
         resp = await self._client.post("/chat/completions", json={
@@ -61,9 +67,13 @@ class ChatLLM:
         if think:
             log.debug("thinking(%d자): %s…", len(think), think[:200])
         text = _THINK.sub("", msg.get("content") or "").strip()
+        if trace is not None:
+            trace.llm(name or "chat", system, user, text, thinking=think,
+                      elapsed=time.monotonic() - started)
         if not text and use_think:
             log.warning("thinking 이 토큰을 소진해 본문 없음 — thinking 끄고 재시도")
-            return await self.chat(system, user, thinking=False)
+            return await self.chat(system, user, thinking=False, trace=trace,
+                                   name=f"{name}:retry" if name else "retry")
         return text
 
     async def ready(self) -> bool:

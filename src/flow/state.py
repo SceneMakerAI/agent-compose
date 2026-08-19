@@ -11,7 +11,7 @@ bench4 는 인벤토리(scenes·segs·utts)를 노드 클로저로 들고 cutran
   향후 checkpointer 도입 여지). 자원은 graph 빌드 시 주입.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypedDict
 
 
@@ -25,6 +25,7 @@ class Inventory:
     utts: tuple[tuple[float, float, str], ...]  # STT (s, e, text) 시간순
     game_line: str                            # "v_id=201  삼성(원정) vs 롯데(홈)"
     inventory_text: str                       # plan 이 보는 목록 렌더 (요청당 1회)
+    pitches: dict = field(default_factory=dict)   # {scene_id: [(투구 시작, 끝)…]} — bounds 재료
 
 
 class ComposeState(TypedDict, total=False):
@@ -39,6 +40,13 @@ class ComposeState(TypedDict, total=False):
     picked: list[dict]       # 채택 클립 (cut 결과 포함 — 전부 복사본 행)
     spare: list[dict]        # 예산 초과 예비 풀
     total: int               # 채택분 컷 후 총 길이(초)
-    endfix_moved: list[str]  # 끝 이동 기록 (리포트용)
-    suspicions: list[tuple]  # verify 의심 [(scene_id, 사유)]
+    endfix_moved: list[str]  # 경계 이동 기록 (리포트용 — bounds 가 채운다)
+    suspicions: list[tuple]  # verify 소견 [(scene_id, 사유)] — 점수 낮은 건만
     status: str              # ok | empty
+    # --- 재배선(2026-08-20) 추가 ---
+    phrases: list[str]       # expand 검색어 (없으면 원 질의 하나)
+    filters: list[str]       # expand 메타 필터 힌트 (태그·라벨)
+    clips: list[dict]        # 경계 확정 전/후 클립 전부 — select 가 여기서 고른다
+    scores: dict             # verify 채점 {scene_id: {score, complete, reason}}
+    dropped: list[tuple]     # select 탈락 [(scene_id, 사유)] — 왜 빠졌나를 남긴다
+    trace: object            # Trace | None — 노드·LLM 입출력 수집기 (직렬화 대상 아님)

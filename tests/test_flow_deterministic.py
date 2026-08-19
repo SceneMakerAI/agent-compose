@@ -202,11 +202,8 @@ def test_prompts_byte_equal_bench4(bench4):
     assert [b for _, b in plan_diff] == [f"- 태그: {prompts.TAG_VOCAB}",
                                          f"- 라벨: {prompts.LABEL_VOCAB}"]
     assert prompts.ENDFIX_SYSTEM == b4p.ENDFIX_SYSTEM
-    ours = prompts.VERIFY_SYSTEM.splitlines()
-    theirs = b4p.VERIFY_SYSTEM.splitlines()
-    diff = [(a, b) for a, b in zip(theirs, ours) if a != b]
-    assert len(ours) == len(theirs) and len(diff) == 1          # 정확히 한 줄만
-    assert diff[0][0].startswith("사유:") and "장면 <번호>" in diff[0][1]   # 그 줄 = A2 수정
+    # VERIFY 는 등가 대상에서 뺀다 — 2026-08-20 재배선에서 "기각 목록"이 아니라
+    # "클립별 일치도 채점"으로 역할 자체가 바뀌었다. bench4 문구와 비교할 대상이 아니다.
     # user 프롬프트 렌더 — 인벤토리 헤더의 '상황' 열만 다르고 나머지는 byte 등가
     u_ours = prompts.plan_user("q", "g", "inv", 180, "fb", "ev").splitlines()
     u_theirs = b4p.plan_user("q", "g", "inv", 180, "fb", "ev").splitlines()
@@ -215,4 +212,3 @@ def test_prompts_byte_equal_bench4(bench4):
     assert [b for _, b in u_diff] == ["번호  태그  라벨  이닝  상황(아웃·주자)  점수(전→후)  타자  길이"]
     rows = [(7, 100, [(95.0, 104.2, "발화")])]
     assert prompts.endfix_user(rows) == b4p.endfix_user(rows)
-    assert prompts.verify_user("스펙", "패킷") == b4p.verify_user("스펙", "패킷")

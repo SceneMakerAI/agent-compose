@@ -119,7 +119,8 @@ class VectorStore:
         log.info("색인 교체: v_id=%s %d건 → %s", v_id, len(rows), self._col)
         return len(rows)
 
-    async def search(self, query_vec: list[float], v_id: int) -> list[dict]:
+    async def search(self, query_vec: list[float], v_id: int,
+                     extra: str | None = None) -> list[dict]:
         """
         Summary:
             질의 벡터로 v_id 범위 검색 — 상위 top_k 히트 (엔티티 필드 포함).
@@ -129,7 +130,7 @@ class VectorStore:
         def _search() -> list[dict]:
             hits = self._mc.search(
                 self._col, data=[query_vec], limit=self._top_k,
-                filter=f"v_id == {v_id}",
+                filter=f"v_id == {v_id}" + (f" and {extra}" if extra else ""),
                 output_fields=["kind", "s", "e", "scene_id", "shot_type",
                                "tags", "labels", "text"])[0]
             return [{"distance": h["distance"], **h["entity"]} for h in hits]

@@ -8,6 +8,7 @@ render=True 원샷: 편성 저장 후 ok 면 worker-render 까지 이어 호출 
 
 import asyncio
 import uuid
+from trace import Trace
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -40,9 +41,9 @@ _JOBS: dict[str, dict] = {}     # job_id → {status, v_id, query, result?, erro
 _JOBS_MAX = 200                 # 오래된 완료 잡 정리 상한 (프로세스 수명 캐시)
 
 # 그래프 노드 → t_video 상태 코드 (UI 진행 표시 — 코드가 바뀌는 노드에서만 기록)
-_NODE_CODE = {"retrieve": COMPOSE_PLAN, "plan": COMPOSE_PLAN, "feedback": COMPOSE_PLAN,
-              "cutrank": COMPOSE_CUT, "backfill": COMPOSE_CUT, "endfix": COMPOSE_CUT,
-              "verify": COMPOSE_VERIFY}
+_NODE_CODE = {"expand": COMPOSE_PLAN, "retrieve": COMPOSE_PLAN, "plan": COMPOSE_PLAN,
+              "feedback": COMPOSE_PLAN, "cut": COMPOSE_CUT, "bounds": COMPOSE_CUT,
+              "select": COMPOSE_CUT, "verify": COMPOSE_VERIFY}
 
 
 class ComposeRequest(BaseModel):
@@ -122,13 +123,15 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
     segs = [{"seg_id": i, **r} for i, r in enumerate(await repo.fetch_shots_all(req.v_id), 1)]
     utts = tuple(await repo.fetch_utterances(req.v_id))
     # 타자 이름은 하단 자막에서 — 선수 질의를 벡터 검색이 아니라 인벤토리로 풀기 위한 재료
-    players.annotate_batters(scenes, await repo.fetch_etc(req.v_id))
+    players.annotate_batters(scenes, await repo.fetch_etc_rows(req.v_id))
     parts = scenes[0]["score"].split()
     inv = Inventory(
         v_id=req.v_id, scenes=tuple(scenes), segs=tuple(segs), utts=utts,
         game_line=f"v_id={req.v_id}  {parts[0]}(원정) vs {parts[2]}(홈)",
         inventory_text=plan_mod.render_inventory(scenes),
+        pitches=await repo.fetch_pitch_windows(req.v_id),   # bounds 시작 후보 재료
     )
+    tr = Trace(st.settings.trace_dir, req.v_id, req.query)
 
     await st.status.set(req.v_id, COMPOSE_PLAN)
     last_code = COMPOSE_PLAN
@@ -141,11 +144,13 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
             last_code = code
             await st.status.set(req.v_id, code)
 
-    state = await run_compose(st.graph, inv, req.query, req.budget, on_node=on_node)
+    state = await run_compose(st.graph, inv, req.query, req.budget, on_node=on_node, trace=tr)
 
     clips = [_clip_row(r) for r in state.get("picked", [])]
     comp_id = await st.compose_repo.save(
         req.v_id, req.query, state.get("spec"), state["status"], clips)
+    tr.finish(comp_id, state["status"], clips=len(clips), total=state.get("total"),
+              dropped=state.get("dropped", []))
 
     render_result = None
     stamp_error = None
@@ -177,6 +182,7 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
         "duration": sum(c["end"] - c["start"] for c in clips),
         "suspicions": state.get("suspicions", []),
         "endfix_moved": state.get("endfix_moved", []),
+        "dropped": state.get("dropped", []),
         "orphans": [{"s": o["s"], "text": o["text"][:80]}
                     for o in state.get("evidence_orphan", [])],
         "status": state["status"],
