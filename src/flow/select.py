@@ -29,6 +29,10 @@ MUST_LABELS = frozenset({"역전", "동점", "끝내기", "경기 종료"})
 DROP_SCORE = 0
 # 점수가 없는 클립(파싱 실패·verify 미실행)의 기본값 — 중립.
 DEFAULT_SCORE = 2
+# 필수층이 예산을 넘길 수 있는 한도 (방침 2026-08-20). 하이라이트에서 득점 장면이
+# 빠지는 건 취향이 아니라 결함이라 예산을 넘겨서라도 담되, 무한정은 아니다 —
+# 900초 요청에 1170초까지가 오차범위. 그 위로는 요청한 물건이 아니게 된다.
+MUST_BUDGET_SLACK = 0.30
 
 
 def _dur(c: dict) -> float:
@@ -79,16 +83,26 @@ def choose(clips: list[dict], spec: dict, scores: dict[int, dict]) -> tuple[list
         return True
 
     # ① 필수 — 사실이 보증하는 장면. 점수 무관, 득점 큰 순.
-    # **예산을 넘겨서라도 담는다** (방침 확정 2026-08-20): 하이라이트에서 득점 장면이
-    # 빠지는 건 취향이 아니라 결함이다. 예산은 목표지 상한이 아니다 — 실측에서 예산
-    # 준수를 얻는 대신 득점 포함률이 71%로 떨어졌고 그 교환은 받아들이지 않는다.
+    # **예산을 넘겨서라도 담되 +30%까지** (방침 확정 2026-08-20): 득점 장면 누락은
+    # 취향이 아니라 결함이라 예산 준수보다 우선한다. 다만 무한정 넘기면 요청한
+    # 물건이 아니게 되므로 오차범위를 상한으로 둔다. 상한에 걸려 떨어지는 건 득점이
+    # 작고 순위가 낮은 뒤쪽부터다.
+    must_cap = budget * (1 + MUST_BUDGET_SLACK)
     must = sorted((c for c in clips if is_must(c)),
                   key=lambda c: (-c["score_delta"], -rank.score(c)))
     for c in must:
+        if total + _dur(c) > must_cap:
+            # taken 에 넣어 뒷 층에서 빼둔다 — 여기서 상한에 걸린 클립은 이미 누적이
+            # 예산을 넘긴 상태라 뒷 층 take() 도 통과할 수 없다. 안 빼면 같은 클립이
+            # 탈락 목록에 두 번 실린다.
+            taken.add(c["scene_id"])
+            dropped.append((c, f"필수지만 허용 상한 초과(+{MUST_BUDGET_SLACK:.0%})"))
+            continue
         take(c, "필수", force=True)
     if total > budget:
-        log.info("필수 장면만으로 예산 초과 %.0fs/%ds (%d건) — 품질 우선이라 그대로 담는다",
-                 total, budget, len(must))
+        log.info("필수층이 예산 초과 %.0fs/%ds (상한 %.0fs · %d건 중 %d건 채택) — "
+                 "품질 우선이라 그대로 담는다",
+                 total, budget, must_cap, len(must), len(picked))
 
     # ② 질의 — targets 에 걸리는 것. 0점은 제외한다.
     if targets:

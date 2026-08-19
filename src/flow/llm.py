@@ -5,6 +5,7 @@ thinking 출력이 content 에 <think>…</think> 로 인라인되는 서버 구
 LLM 출력은 항상 줄 형식 — JSON 강제는 금지 (bench4 실측 확정: 줄 형식이 안정).
 """
 
+import asyncio
 import re
 import time
 
@@ -34,6 +35,7 @@ class ChatLLM:
             base_url=settings.llm_base_url, timeout=settings.llm_timeout)
         self._model = settings.llm_model
         self._thinking_enabled = settings.llm_thinking
+        self._gate = asyncio.Semaphore(settings.llm_concurrency)
 
     async def chat(self, system: str, user: str, thinking: bool = False,
                    trace=None, name: str = "") -> str:
@@ -51,15 +53,18 @@ class ChatLLM:
         started = time.monotonic()
         log.debug("LLM 요청 system(%d자):\n%s", len(system), system)
         log.debug("LLM 요청 user(%d자):\n%s", len(user), user)
-        resp = await self._client.post("/chat/completions", json={
-            "model": self._model, "temperature": 0,
-            "max_tokens": MAX_TOKENS_THINK if use_think else MAX_TOKENS,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "chat_template_kwargs": {"enable_thinking": use_think},
-        })
+        # 세마포어는 **전송만** 감싼다. 메서드 전체를 감싸면 아래 thinking 재시도가
+        # 자기 자신을 재귀 호출하면서 이미 쥔 허가 위에 또 허가를 기다려 교착한다.
+        async with self._gate:
+            resp = await self._client.post("/chat/completions", json={
+                "model": self._model, "temperature": 0,
+                "max_tokens": MAX_TOKENS_THINK if use_think else MAX_TOKENS,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "chat_template_kwargs": {"enable_thinking": use_think},
+            })
         resp.raise_for_status()
         msg = resp.json()["choices"][0]["message"]
         # 사고 필드명은 서버 구성에 따라 다르다 — 이 vLLM 은 'reasoning' (실측)

@@ -5,13 +5,18 @@ from flow.state import Inventory
 
 
 class StubLLM:
-    """콜 이름별 응답 스텁 — 노드가 늘어도 순서에 의존하지 않는다."""
+    """콜 이름별 응답 스텁 — 노드가 늘어도 순서에 의존하지 않는다.
+
+    bounds·verify 는 클립당 1콜이라 이름이 "verify[2]" 처럼 붙는다 — 대괄호를 떼고
+    찾는다 (안 떼면 스텁이 조용히 빗나가 기본값으로 흘러 테스트가 거짓 통과한다).
+    """
 
     def __init__(self, by_name: dict | None = None, **kw):
         self.by_name = dict(by_name or {}, **kw)
 
     async def chat(self, system, user, thinking=False, trace=None, name=""):
-        return self.by_name.get(name, DEFAULTS.get(name, ""))
+        base = name.split("[")[0]
+        return self.by_name.get(base, DEFAULTS.get(base, ""))
 
 
 class StubEmb:
@@ -113,6 +118,31 @@ class CapturingLLM(StubLLM):
     def prompt_of(self, call: str) -> tuple[str, str]:
         """해당 콜의 (system, user) — 노드 순서가 바뀌어도 이름으로 찾는다."""
         return next((s, u) for s, u, n in self.calls if n == call)
+
+    def names_of(self, call: str) -> list[str]:
+        """해당 콜 이름으로 시작하는 콜 전부 — 팬아웃 건수 확인용."""
+        return [n for _s, _u, n in self.calls if n.split("[")[0] == call]
+
+
+async def test_bounds_and_verify_fan_out_per_clip():
+    """클립마다 1콜씩 나가야 한다 — 한 콜에 몰면 전송이 직렬이라 GPU 가 논다.
+
+    묶어 보내던 시절 v201 은 bounds 10분 26초 · verify 9분 8초를 쓰면서 서버는 내내
+    Running 1 · KV 3% 였다 (실측 2026-08-20). 콜 수는 눈으로 안 보이니 여기서 고정한다.
+    """
+    # bounds 는 후보가 있는 클립만 묻는다 — 보드 투구와 꼬리 발화를 깔아 둘 다 물게 한다
+    inv = Inventory(v_id=999, scenes=SCENES, segs=SEGS,
+                    utts=((118.0, 124.0, "넘어갑니다"), (212.0, 218.0, "잡아냅니다")),
+                    game_line="g", inventory_text="(목록)",
+                    pitches={1: [(96, 97)], 2: [(196, 197)]})
+    llm = CapturingLLM()
+    g = build_graph(llm, StubEmb(), StubStore())
+    await run_compose(g, inv, "안타 모음", 300)
+    assert llm.names_of("bounds") == ["bounds[1]", "bounds[2]"]
+    assert sorted(llm.names_of("verify")) == ["verify[1]", "verify[2]"]
+    # 프롬프트에는 자기 클립만 실린다 (남의 장면이 섞이면 나눈 의미가 없다)
+    _sys, user = next((s, u) for s, u, n in llm.calls if n == "verify[1]")
+    assert "[1]" in user and "[2]" not in user
 
 
 async def test_caller_budget_reaches_plan_prompt():

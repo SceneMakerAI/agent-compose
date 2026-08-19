@@ -27,6 +27,7 @@ retrieve 실패는 전파 — bench4 의 fail-open 폐기 (design.md §2).
 그래프는 무상태 배선이라 프로세스당 1회 컴파일.
 """
 
+import asyncio
 import inspect
 import math
 import re
@@ -155,7 +156,13 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
                              f"질의를 어휘로 다시 번역해 골라라.")}
 
     async def bounds_node(st: ComposeState) -> dict:
-        """시작·끝을 함께 정한다. 후보는 결정적으로 만들고 LLM 은 고르기만 한다."""
+        """시작·끝을 함께 정한다. 후보는 결정적으로 만들고 LLM 은 고르기만 한다.
+
+        **클립 1건 = 콜 1건으로 펼쳐 동시에 보낸다.** 한 콜에 몰면 전송이 직렬이라
+        GPU 가 놀았다 (실측 v201: 24클립 10분 26초 동안 서버는 내내 Running 1 ·
+        KV 3%). 경계 판정은 클립끼리 독립이라 나눠도 근거가 줄지 않고, 응답을
+        **자기 행에만** 대조하므로 한 콜의 헛번호가 남의 클립을 못 건드린다.
+        """
         inv = st["inv"]
         clips = [dict(r, cut=dict(r["cut"])) for r in st["clips"]]     # 복사 후 수정
         if not use_bounds:
@@ -163,11 +170,23 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         rows = bounds_mod.build_rows(clips, list(inv.segs), inv.utts, inv.pitches)
         if not rows:
             return {"clips": clips}
-        text = await llm.chat(prompts.BOUNDS_SYSTEM, prompts.bounds_user(rows),
-                              thinking=True, trace=st.get("trace"), name="bounds")
-        moved = bounds_mod.apply(clips, rows, text)
+
+        async def one(row: dict) -> str:
+            """행 1건 질의 — 실패는 그 클립만 원 경계 유지 (배치 전체를 죽이지 않는다)."""
+            try:
+                return await llm.chat(
+                    prompts.BOUNDS_SYSTEM, prompts.bounds_user([row]), thinking=True,
+                    trace=st.get("trace"), name=f"bounds[{row['scene_id']}]")
+            except Exception as e:                   # noqa: BLE001 — 건별 격리
+                log.warning("bounds 실패(장면%d 경계 유지): %s", row["scene_id"], e)
+                return ""
+
+        texts = await asyncio.gather(*(one(r) for r in rows))
+        moved: list[str] = []
+        for row, text in zip(rows, texts):
+            moved += bounds_mod.apply(clips, [row], text)
         if moved:
-            log.info("bounds: 경계 이동 %s", moved)
+            log.info("bounds: %d콜 동시 · 경계 이동 %s", len(rows), moved)
         if tr := st.get("trace"):
             tr.node("bounds", asked=len(rows), moved=moved)
         return {"clips": clips, "endfix_moved": moved}
@@ -175,19 +194,39 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
     async def verify_node(st: ComposeState) -> dict:
         """클립별 채점 — 기각권은 없다. select 가 자를 때 이 점수를 쓴다.
 
+        bounds 와 같은 이유로 **클립당 1콜을 동시에** 보낸다. 채점 기준은 클립 자신과
+        명세뿐이라 다른 클립을 볼 이유가 없었다.
+
         실패를 삼킨다: 이 콜 하나가 이미 확정된 클립을 통째로 날리던 문제(audit 5-1).
+        이제 격리 단위가 클립이라 한 건이 실패해도 나머지 채점은 남는다 (점수 없는
+        클립은 select 가 DEFAULT_SCORE 로 중립 처리).
         """
+        clips = st["clips"]
+        spec_line = plan.spec_line(st["spec"])
+
+        async def one(c: dict) -> dict:
+            try:
+                text = await llm.chat(
+                    prompts.VERIFY_SYSTEM,
+                    prompts.verify_user(spec_line, _packets(st["inv"], [c])),
+                    thinking=True, trace=st.get("trace"),
+                    name=f"verify[{c['scene_id']}]",
+                )
+                got = plan.parse_verify(text)
+                sid = c["scene_id"]
+                # 자기 장면 번호만 취한다 — 한 콜이 헛번호를 뱉어 남의 클립 점수를
+                # 덮는 경로를 막는다. 번호를 틀렸어도 답이 한 줄이면 이 클립 것이다.
+                if sid in got:
+                    return {sid: got[sid]}
+                return {sid: next(iter(got.values()))} if len(got) == 1 else {}
+            except Exception as e:                   # noqa: BLE001 — 소견이 편성을 죽이면 안 된다
+                log.warning("verify 실패(장면%d 채점 없이 진행): %s", c["scene_id"], e)
+                return {}
+
         scores: dict[int, dict] = {}
-        try:
-            text = await llm.chat(
-                prompts.VERIFY_SYSTEM,
-                prompts.verify_user(plan.spec_line(st["spec"]), _packets(st["inv"], st["clips"])),
-                thinking=True, trace=st.get("trace"), name="verify",
-            )
-            log.info("verify 응답: %r", text)
-            scores = plan.parse_verify(text)
-        except Exception as e:                       # noqa: BLE001 — 소견이 편성을 죽이면 안 된다
-            log.warning("verify 실패(채점 없이 진행): %s", e)
+        for part in await asyncio.gather(*(one(c) for c in clips)):
+            scores.update(part)
+        log.info("verify: %d콜 동시 · 채점 %d건", len(clips), len(scores))
         broken = [i for i, v in scores.items() if not v["complete"]]
         if broken:
             log.warning("verify 완결성 문제 %s — startfix 신호(클립은 유지)", broken)
