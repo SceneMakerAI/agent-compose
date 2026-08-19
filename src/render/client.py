@@ -1,6 +1,8 @@
-"""worker-render 호출 클라이언트 — 동기 렌더 1식 (lifespan 공유 전제).
+"""worker-render 호출 클라이언트 — 렌더 접수·상태 조회 1식 (lifespan 공유 전제).
 
-sync_yn=True 로 완주까지 기다리므로 타임아웃은 LLM 보다 길게(설정 render_timeout).
+단독 렌더는 sync_yn=False 로 접수만 하고 status() 로 폴링한다. 원샷(compose
+render=true)만 sync_yn=True 로 완주까지 기다리므로 타임아웃은 LLM 보다 길게
+(설정 render_timeout).
 readyz 프로브에는 넣지 않는다 — GPU 야간 자동 중지 시간대마다 서비스 전체가
 not-ready 로 뒤집히는 오탐을 피한다 (렌더는 편성의 하류 옵션 기능).
 """
@@ -36,6 +38,20 @@ class RenderClient:
             httpx.HTTPError: 접속 불가·타임아웃·4xx/5xx — 호출부가 502 로 변환.
         """
         resp = await self._client.post("/render/sports/baseball", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def status(self, v_id: int, c_id: int) -> dict:
+        """
+        Summary:
+            렌더 1건의 현재 상태 조회 — GET /render/{v_id}/{c_id}.
+        Returns:
+            dict: {status, output_path, error}. status 는
+                accepted(큐 대기) / running / done / error.
+        Raises:
+            httpx.HTTPError: 접속 불가·타임아웃·4xx/5xx.
+        """
+        resp = await self._client.get(f"/render/{v_id}/{c_id}", timeout=30.0)
         resp.raise_for_status()
         return resp.json()
 

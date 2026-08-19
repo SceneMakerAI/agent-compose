@@ -49,7 +49,15 @@ class TestBuildRequest:
         req = build_request(202, 5, [_clip(1, "1회 초", 0, 10)], bumper=False)
         assert req["v_id"] == 202 and req["c_id"] == 5
         assert req["file_name"] == f"202/{SOURCE_FILE_NAME}"   # v_id 접두 상대 경로
-        assert req["sync_yn"] is True and req["bumper"] is False
+        # 필드명은 bumper 가 아니라 bumper_yn — 워커 OpenAPI 실측(2026-08-19).
+        # bumper 로 보내면 워커가 무시하고 기본값 false 를 쓴다(범퍼 누락 실측 원인).
+        assert req["bumper_yn"] is False and "bumper" not in req
+
+    def test_sync_yn_기본은_비동기_접수(self):
+        """단독 렌더는 접수만(False), 원샷만 완주 대기(True)."""
+        clips = [_clip(1, "1회 초", 0, 10)]
+        assert build_request(202, 5, clips, bumper=True)["sync_yn"] is False
+        assert build_request(202, 5, clips, bumper=True, sync=True)["sync_yn"] is True
 
     def test_클립_0건은_ValueError(self):
         with pytest.raises(ValueError, match="0건"):

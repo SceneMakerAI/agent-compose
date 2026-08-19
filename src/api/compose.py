@@ -20,6 +20,7 @@ from db.status_repo import (
     COMPOSE_ERROR,
     COMPOSE_ERROR_RENDER,
     COMPOSE_ERROR_SOURCE,
+    COMPOSE_ERROR_STAMP,
     COMPOSE_OK,
     COMPOSE_PLAN,
     COMPOSE_RENDER,
@@ -144,12 +145,23 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
         req.v_id, req.query, state.get("spec"), state["status"], clips)
 
     render_result = None
+    stamp_error = None
     if req.render:
         progress.append("render")
         render_result = await _render_after(st, req, comp_id, state["status"], clips)
-    # 최종 상태 코드 — 렌더 실패 > empty > 완료 순으로 판정
+        if render_result.get("status") not in ("error", "skipped"):
+            # 렌더 성공만 t_compose 에 스탬프 — 뷰어의 중복 렌더 차단 근거.
+            # 기록 실패를 조용히 넘기면 중복 렌더를 부르므로 4960 으로 드러낸다.
+            try:
+                await st.compose_repo.mark_rendered(comp_id)
+            except Exception as e:      # 실패 사실을 상태 코드로 남기고 계속
+                log.exception("렌더 완료 기록 실패: comp_id=%s", comp_id)
+                stamp_error = f"{type(e).__name__}: {e}"
+    # 최종 상태 코드 — 렌더 실패 > 기록 실패 > empty > 완료 순으로 판정
     if render_result and render_result.get("status") == "error":
         await st.status.set(req.v_id, COMPOSE_ERROR_RENDER, render_result.get("error"))
+    elif stamp_error:
+        await st.status.set(req.v_id, COMPOSE_ERROR_STAMP, stamp_error)
     elif state["status"] == "empty":
         await st.status.set(req.v_id, COMPOSE_EMPTY)
     else:
@@ -170,20 +182,23 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
 
 async def _render_after(st, req: ComposeRequest, comp_id: int, status: str,
                         clips: list[dict]) -> dict:
-    """원샷 렌더 — 편성이 ok 일 때만 worker-render 동기 호출.
+    """원샷 렌더 — 편성이 ok 일 때만 worker-render 동기 호출(sync_yn=True).
 
+    잡이 이미 백그라운드라 여기서는 완주까지 기다린다 — 잡 하나로 편성·렌더가 함께
+    끝나는 게 원샷의 취지 (단독 POST /render 는 비동기 접수 + 폴러 감시).
     렌더 실패가 편성 성공을 뒤집지 않는다 — 편성은 이미 저장됐으므로 잡의
     render 필드에 사유만 남긴다 (empty·이닝 결손은 호출 전 생략 = 사전 차단).
     """
     if status != "ok" or not clips:
         return {"status": "skipped", "reason": f"편성 status={status} 클립 {len(clips)}건 — 렌더 생략"}
     try:
-        payload = build_request(req.v_id, comp_id, clips, req.bumper)
+        payload = build_request(req.v_id, comp_id, clips, req.bumper, sync=True)
     except ValueError as e:
         log.warning("렌더 생략(comp_id=%s): %s", comp_id, e)
         return {"status": "skipped", "reason": str(e)}
     try:
         await st.status.set(req.v_id, COMPOSE_RENDER)
+        await st.compose_repo.mark_render_started(comp_id, req.bumper)  # 실제 사용한 범퍼 값
         result = await st.render.render(payload)
     except httpx.HTTPError as e:
         log.error("원샷 렌더 실패: comp_id=%s %s: %s", comp_id, type(e).__name__, e)

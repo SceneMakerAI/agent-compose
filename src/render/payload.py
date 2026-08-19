@@ -5,9 +5,10 @@ worker-render 계약 (2026-08-18 스펙):
   가 항상 /mnt/nvme/vod/{v_id}/source.mp4 로 만든다 (v_id 접두 필수 — 실렌더 확인 2026-08-18).
 - innings: {"{이닝번호}_{top|bot}": [{start_sec, end_sec, start_hms, end_hms}, …]}.
   렌더링은 sec 값만 사용, hms 는 디버깅 표기용.
-- bumper: 이닝 그룹 사이 범퍼 삽입. 스펙 예제(bumper)와 표(bumper_yn)의 필드명이
-  달라 예제 기준으로 시작 — 실렌더 테스트로 확정 예정.
-- sync_yn=True: 렌더 완주 후 응답 (이 플로우는 상태 저장 없이 요청-응답으로 끝낸다).
+- bumper_yn: 이닝 그룹 사이 범퍼 삽입. 스펙 문서의 예제(bumper)와 표(bumper_yn)가
+  달라 예제를 따랐었는데, 워커 OpenAPI 실측 결과 **bumper_yn 이 정답**이고 워커 기본값은
+  false 다 (2026-08-19 확인 — 그 전까지 bumper 는 무시돼 범퍼 없이 렌더됐다).
+- sync_yn: True 면 완주 후 응답, False 면 즉시 accepted + GET /render/{v_id}/{c_id} 폴링.
 
 inning 이 비거나 형식 밖인 클립은 ValueError — 상류 발행 데이터 결함 신호라서,
 조용히 빼고 렌더하면 편성과 결과물이 어긋난다 (사전 차단, 호출부가 4xx 로 변환).
@@ -43,7 +44,8 @@ def sec_to_hms(sec: float) -> str:
     return f"{int(h):02d}:{int(m):02d}:{rem:04.1f}"
 
 
-def build_request(v_id: int, c_id: int, clips: list[dict], bumper: bool) -> dict:
+def build_request(v_id: int, c_id: int, clips: list[dict], bumper: bool,
+                  sync: bool = False) -> dict:
     """
     Summary:
         편성 클립들 → POST /render/sports/baseball 요청 본문.
@@ -52,6 +54,7 @@ def build_request(v_id: int, c_id: int, clips: list[dict], bumper: bool) -> dict
         c_id (int): 편성 id (comp_id — 결과 파일 c_{c_id}.mp4 로 추적).
         clips (list[dict]): t_compose_clip 행 (scene_id·inning·start·end, 시간순 전제).
         bumper (bool): 이닝 그룹 사이 범퍼 삽입 여부.
+        sync (bool): True 면 워커가 완주까지 잡아둔다 (원샷 전용 — 단독 렌더는 False).
     Returns:
         dict: worker-render 요청 본문.
     Raises:
@@ -80,7 +83,7 @@ def build_request(v_id: int, c_id: int, clips: list[dict], bumper: bool) -> dict
         "v_id": v_id,
         "c_id": c_id,
         "file_name": f"{v_id}/{SOURCE_FILE_NAME}",
-        "sync_yn": True,
-        "bumper": bumper,
+        "sync_yn": sync,
+        "bumper_yn": bumper,
         "innings": innings,
     }

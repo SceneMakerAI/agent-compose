@@ -70,6 +70,8 @@ curl -X POST localhost:8084/api/v1/compose \
 - `budget`(초)은 선택 — 주면 질의 해석보다 우선. 생략 시 질의에서 해석 (기본 180).
 - `render`(기본 **false**): true 면 편성 ok 후 worker-render 까지 이어 호출하는 원샷 —
   잡 결과에 `render` 필드({status, output_path} 또는 skipped/error 사유)가 추가된다.
+  원샷은 **완주까지 기다린다**(단독 렌더는 접수만) — 잡 하나로 편성·렌더가 함께 끝난다.
+  렌더 성공 시 `t_compose.render_datetime` 도 함께 기록된다.
   empty·이닝 결손이면 렌더를 생략하고 사유를 남기며, 렌더 실패가 편성 성공을 뒤집지 않는다.
   `bumper`(기본 true)는 render=true 일 때만 의미.
 - plan 노드가 thinking 이라 **총 1~3분** — 그래서 202 + 잡 폴링 패턴.
@@ -120,26 +122,50 @@ curl 'localhost:8084/api/v1/compose?comp_id=6'
 
 ### 렌더 (render) — 편성을 mp4 로
 
-#### `POST /api/v1/render` — 동기 (렌더 완주까지 대기)
+#### `POST /api/v1/render` — 202 접수 (완료는 폴링)
 
 저장된 편성(comp_id)을 worker-render 에 넘겨 하이라이트 mp4 를 만든다.
 클립을 이닝 키(`3회 초` → `3_top`)로 그룹핑해 전달하며, 원본은
 worker-prep-stt 산출 고정 파일명(`source.mp4`)을 쓴다.
+렌더가 GPU 수 분이라 접수만 하고 202 를 돌려준다 — 완료는 서버가 백그라운드로
+워커에 물어 확정하고, 호출자는 아래 GET 으로 확인한다.
 
 ```bash
 curl -X POST localhost:8084/api/v1/render \
   -H 'Content-Type: application/json' -d '{"comp_id": 5, "bumper": true}'
-# → {"comp_id": 5, "v_id": 202, "status": "done",
-#    "output_path": "/mnt/nvme/vod/202/c_5.mp4", "error": ""}
+# → 202 {"comp_id": 5, "v_id": 202, "status": "accepted",
+#        "output_path": "/mnt/nvme/vod/202/202_5.mp4"}   ← 예정 경로 (파일은 아직 없음)
 ```
 
-- `bumper`(기본 true): 이닝 그룹 사이 범퍼 삽입.
-- 상태 저장 없음 — 요청-응답으로 끝. 실패는 응답으로 드러난다.
+- `bumper`(기본 true): 이닝 그룹 사이 범퍼 삽입 (워커 필드는 `bumper_yn`, 워커 기본값 false).
+- `force`(기본 false): 이미 렌더된 편성을 다시 렌더 (범퍼 변경 등 운영용).
+- 접수 시 `t_compose.bumper_yn`(실제 사용값), 완료 확인 시 `render_datetime`(완료 시각)을 기록.
+  **실패는 완료 시각을 남기지 않는다** — 실패가 편성을 영구히 잠그면 안 되므로 재렌더가 열려 있다.
+  → 소비 측 계약: `render_datetime IS NULL` = 미렌더(렌더 버튼 노출), NOT NULL = 영상 준비됨.
 - 사전 차단 (worker 호출 전 이쪽에서 거른다):
   - **409** `COMPOSE_NOT_RENDERABLE` — status=empty 또는 클립 0건 (빈 렌더 금지)
+  - **409** `COMPOSE_ALREADY_RENDERED` — 이미 렌더됨 (`rendered_at` 동봉). 사용자 잘못이
+    아니라 경쟁 상황이므로 에러가 아닌 안내로 처리하고 재생을 권한다. 재렌더는 `force`.
+  - **409** `RENDER_IN_PROGRESS` — 같은 편성이 렌더 중 (완료 전엔 `render_datetime` 이 NULL 이라
+    이 검사가 중복을 막는다)
   - **422** `COMPOSE_INVALID_INNING` — 이닝 없는 클립 존재 (발행 데이터 결함 신호)
   - **404** `COMPOSE_NOT_FOUND`
-- **502** `RENDER_FAILED` — worker-render 접속 불가·타임아웃·오류 응답.
+- **502** `RENDER_FAILED` — 접수 자체가 실패 (worker-render 접속 불가·오류 응답).
+
+#### `GET /api/v1/render/{comp_id}` — 렌더 상태
+
+```bash
+curl localhost:8084/api/v1/render/5
+# → {"comp_id": 5, "v_id": 202, "status": "running", "output_path": "...", "error": ""}
+```
+
+`status`: `done`(완료) · `running` · `accepted`(큐 대기) · `error` ·
+`not_requested`(렌더 요청된 적 없음) · `unknown`(워커 조회 불가 — GPU 중지 등, `error` 에 사유).
+
+완료 기록이 이미 있으면 워커를 거치지 않고 DB 로 답한다(`rendered_at` 동봉).
+기록이 없는데 워커가 `done` 이면 **이 조회가 그 자리에서 기록을 보정한다** — 배포·재기동으로
+감시가 끊겨도 조회 한 번이면 되살아난다. 보정까지 실패하면 `stamped: false` 가 함께 온다
+(영상은 있으나 기록 실패 — `status_code` 4960).
 
 ### 헬스
 

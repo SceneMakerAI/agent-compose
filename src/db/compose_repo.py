@@ -55,6 +55,38 @@ class ComposeRepo:
         log.info("t_compose 저장: comp_id=%s (%d클립)", comp_id, len(clips))
         return comp_id
 
+    async def mark_render_started(self, comp_id: int, bumper: bool) -> None:
+        """
+        Summary:
+            렌더 접수 시점 기록 — 워커에 실제로 보낸 범퍼 옵션.
+        Description:
+            - bumper_yn 은 "실제 사용값의 기록"이라 접수 때 확정된다. 완료를 기다리는
+              폴러가 이 값을 들고 다닐 필요가 없다.
+        """
+        async with self._db.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE t_compose SET bumper_yn = %s WHERE comp_id = %s",
+                    (1 if bumper else 0, comp_id))
+            await conn.commit()
+
+    async def mark_rendered(self, comp_id: int) -> None:
+        """
+        Summary:
+            렌더 성공을 기록 — 완료 시각 스탬프.
+        Description:
+            - render_datetime IS NULL = 미렌더 → 뷰어의 렌더 버튼 노출·중복 차단 근거.
+            - 실패는 삼키지 않는다 — 스탬프 누락은 중복 렌더(GPU 수 분·수백 MB)를
+              부르므로 표시용인 status_code 와 달리 예외를 그대로 올린다.
+        """
+        async with self._db.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE t_compose SET render_datetime = NOW() WHERE comp_id = %s",
+                    (comp_id,))
+            await conn.commit()
+        log.info("렌더 완료 기록: comp_id=%s", comp_id)
+
     async def fetch(self, comp_id: int) -> dict | None:
         """저장된 편성 재조회 — 헤더 + 클립 목록 (초 단위 환산)."""
         from asyncmy.cursors import DictCursor

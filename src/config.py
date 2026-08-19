@@ -43,9 +43,10 @@ class Settings(BaseSettings):
     embed_timeout: float = 60.0
     embed_batch: int = 64               # 색인 배치 크기 — 문서 수백 건을 나눠 보낸다
 
-    # --- worker-render (하이라이트 mp4 렌더링 — 동기 호출) ---
+    # --- worker-render (하이라이트 mp4 렌더링) ---
     render_base_url: str                # 예: http://host:8003 — 테스트 기간은 GA 경유
-    render_timeout: float = 600.0       # sync_yn=True 완주 대기 상한 (LLM 보다 길게)
+    render_timeout: float = 600.0       # 완주 대기 상한 (원샷 sync 호출 / 비동기 폴링 공용)
+    render_poll_interval: float = 5.0   # 비동기 렌더 상태 폴링 주기(초)
 
     # --- Milvus ---
     milvus_uri: str                     # 예: http://host:19530 — 접속 불가는 readyz 가 노출

@@ -24,6 +24,7 @@ COMPOSE_ERROR = 4900         # 편성 실패 (일반)
 COMPOSE_ERROR_SOURCE = 4910  # 발행본 없음 (publish 선행 필요)
 COMPOSE_ERROR_INGEST = 4920  # 색인 실패
 COMPOSE_ERROR_RENDER = 4950  # 렌더 실패 (편성은 저장됨 — 재렌더 가능)
+COMPOSE_ERROR_STAMP = 4960   # mp4 는 생성됐으나 t_compose 완료 기록 실패 (수동 확인 필요)
 
 
 class StatusRepo:
