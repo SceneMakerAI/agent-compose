@@ -11,10 +11,9 @@ bench4 와 다른 점:
 
 from flow import vocab
 
-# 어휘 — plan 이 아는 말의 전부 (판별불가는 발행에 없으므로 제외, bench4 나열 순서 유지)
-TAG_VOCAB = (
-    "홈런, 안타, 번트, 볼넷, 사구, 삼진, 범타, 도루, 폭투·포일, 견제, 실책, 호수비, 비디오 판독·리플레이"
-)
+# 어휘 — plan 이 아는 말의 전부 (판별불가는 발행에 없으므로 제외).
+# 하드코딩하면 vision3 에 태그가 늘어도 프롬프트만 옛 어휘로 남는다 (보크 실측).
+TAG_VOCAB = ", ".join(t for t in vocab.PLAY_TAGS if t != "판별불가")
 LABEL_VOCAB = ", ".join(vocab.LABELS)
 
 PLAN_SYSTEM = f"""\

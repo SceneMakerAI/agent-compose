@@ -15,6 +15,12 @@ from flow import cut, rank, vocab
 
 _BENCH4 = Path(__file__).resolve().parents[3] / "poc" / "poc-search-bench4" / "src"
 
+# bench4 는 동결된 POC 라, 어휘는 vision3 를 따라가며 의도적으로 갈라진다.
+# 그 갈라진 지점만 여기 명시하고 나머지는 계속 전행 등가로 묶는다 —
+# 목록을 늘리지 않으면 새 드리프트는 그대로 실패로 드러난다.
+_NEW_TAGS = {"보크"}                          # bench4 이후 vision3 에 추가된 태그
+_RENAMED_LABELS = {"희생플라이": "진루타"}       # 전광판으론 뜬공/땅볼 구분 불가 → 포괄 명칭
+
 
 @pytest.fixture(scope="module")
 def bench4():
@@ -102,9 +108,11 @@ def test_cut_immutability():
 def test_vocab_constants_equal_bench4(bench4):
     """상수 드리프트 감시 — bench4 config 와 값 일치."""
     c = bench4["config"]
-    assert vocab.CUT_RECIPE == c.CUT_RECIPE
+    assert {k: v for k, v in vocab.CUT_RECIPE.items() if k not in _NEW_TAGS} == c.CUT_RECIPE
     assert vocab.FULL_CLIP_TAGS == c.FULL_CLIP_TAGS
-    assert vocab.LABEL_EXTRA_SHOTS == c.LABEL_EXTRA_SHOTS
+    assert vocab.LABEL_EXTRA_SHOTS == {
+        _RENAMED_LABELS.get(k, k): v for k, v in c.LABEL_EXTRA_SHOTS.items()
+    }
     assert vocab.RANK_LABEL_BONUS == c.RANK_LABEL_BONUS
     assert vocab.RANK_TAG_BONUS == c.RANK_TAG_BONUS
     assert (vocab.LABEL_EXTRA_MAX_SEC, vocab.DIALOGUE_TAIL_MAX_SEC,
@@ -123,6 +131,22 @@ def test_vocab_tags_synced_with_vision3():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert set(vocab.PLAY_TAGS) == {t.name for t in mod.TAGS}
+    assert vocab.PLAY_TAGS == tuple(t.name for t in mod.TAGS)   # 프롬프트 어휘 줄 순서
+
+
+def test_vocab_labels_synced_with_vision3():
+    """파생 라벨도 vision3 publish 가 실제로 붙이는 문자열과 등가.
+
+    태그만 감시하던 탓에 '희생플라이'→'진루타' 개명이 통째로 새어, LABEL_EXTRA_SHOTS
+    키가 죽은 이름으로 남아 진루타 클립이 여운 샷을 못 붙였다 (실측 comp 15·16).
+    """
+    pub = (Path(__file__).resolve().parents[2] / "agent-vision3" / "src" / "sports"
+           / "baseball" / "publish" / "__init__.py")
+    if not pub.exists():
+        pytest.skip("agent-vision3 미존재")
+    src = pub.read_text(encoding="utf-8")
+    missing = [lab for lab in vocab.LABELS if f'"{lab}"' not in src]
+    assert not missing, f"vision3 publish 에 없는 라벨: {missing}"
 
 
 def test_vocab_validate():
@@ -132,12 +156,18 @@ def test_vocab_validate():
 # ── 프롬프트 byte 등가 (compose-flow.md §5-1 게이트) ───
 
 def test_prompts_byte_equal_bench4(bench4):
-    """PLAN·ENDFIX 는 byte 등가, VERIFY 는 A2 사유 줄 하나만 다름을 고정."""
+    """PLAN 은 어휘 2줄, VERIFY 는 A2 사유 줄만 다르고 나머지는 byte 등가."""
     spec = importlib.util.spec_from_file_location("b4_prompt", _BENCH4 / "compose" / "prompt.py")
     b4p = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(b4p)
     from flow import prompts
-    assert prompts.PLAN_SYSTEM == b4p.PLAN_SYSTEM
+    plan_ours = prompts.PLAN_SYSTEM.splitlines()
+    plan_theirs = b4p.PLAN_SYSTEM.splitlines()
+    plan_diff = [(a, b) for a, b in zip(plan_theirs, plan_ours) if a != b]
+    assert len(plan_ours) == len(plan_theirs)
+    # 어휘 줄만 다르다 — 문구·규칙이 갈라지면 여기서 걸린다
+    assert [b for _, b in plan_diff] == [f"- 태그: {prompts.TAG_VOCAB}",
+                                         f"- 라벨: {prompts.LABEL_VOCAB}"]
     assert prompts.ENDFIX_SYSTEM == b4p.ENDFIX_SYSTEM
     ours = prompts.VERIFY_SYSTEM.splitlines()
     theirs = b4p.VERIFY_SYSTEM.splitlines()
