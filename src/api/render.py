@@ -129,7 +129,9 @@ async def get_render(comp_id: int, request: Request) -> dict:
         raise HTTPException(404, detail={"code": "COMPOSE_NOT_FOUND", "comp_id": comp_id})
 
     v_id = comp["v_id"]
-    if comp["render_datetime"]:
+    # force 재렌더 중이면 render_datetime 은 직전 렌더의 시각이라 DB 지름길이 거짓말을 한다
+    # (지금 도는 렌더를 done 으로 보고) — 진행 중일 때는 워커 상태를 그대로 묻는다
+    if comp["render_datetime"] and comp_id not in _RENDERING:
         return {"comp_id": comp_id, "v_id": v_id, "status": "done",
                 "rendered_at": comp["render_datetime"].isoformat()}
 
