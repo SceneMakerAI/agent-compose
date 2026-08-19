@@ -33,6 +33,14 @@ START_MAX_BACK_SEC = 40
 START_MAX_FWD_SEC = 30
 # 시작을 미뤄도 클립이 이보다 짧아지면 안 된다 — 플레이를 잘라 먹는다.
 MIN_CLIP_SEC = 8
+# 후보끼리 이보다 가까우면 **같은 지점**으로 본다.
+# 근거: 해설 발화가 중앙 4.7~7.0초, 샷이 중앙 3.0~4.0초다(v200·201·202 실측).
+# 후보가 그보다 촘촘하면 화면도 해설도 그 차이를 표현하지 못한다 — 실제로 v200
+# 장면41 의 7702·7697 은 해설이 글자 그대로 같고 화면은 "포수 뒤쪽 기본 앵글에서…"
+# 정형구라 판단에 쓸 수 없었다. 답이 없는 문제를 내면 모델은 판별자를 찾다가 사고를
+# 태운다(장면61 94,575자·804초). 78초 클립의 시작이 7702냐 7697이냐는 보는 사람에게
+# 같으므로, 정보 손실이 아니라 없는 선택지를 지우는 것이다.
+MERGE_GAP_SEC = 5.0
 # 끝을 늘릴 수 있는 최대 폭 (구 ENDFIX_MAX_EXT_SEC 계승).
 END_MAX_EXT_SEC = 12
 # 후보 개수 상한 — 많으면 모델이 고르지 못하고 프롬프트만 커진다.
@@ -104,19 +112,27 @@ def _sig(ctx: dict) -> tuple:
     return (ctx.get("shot_type") or "", ctx.get("shot") or "", ctx.get("utt") or "")
 
 
-def _dedup(cands: list[dict], drop_sig: tuple | None = None) -> list[dict]:
-    """서명이 같은 후보는 앞선 것 하나만. drop_sig 와 같은 것은 통째로 뺀다.
+def _dedup(cands: list[dict], drop_sig: tuple | None = None,
+           near: float | None = None) -> list[dict]:
+    """같은 지점으로 볼 후보를 하나로 접는다. 앞선 것(호출자가 정한 우선순위)이 남는다.
 
-    drop_sig 는 '현재'의 서명이다 — 현재와 화면·해설이 같은 후보는 대안이 아니라
-    같은 지점의 다른 표기이고, 그 답은 이미 "유지"다.
+    두 기준을 함께 쓴다:
+    - **서명**(화면·해설)이 같으면 같은 지점. drop_sig 와 같으면 통째로 뺀다 —
+      '현재'와 같은 후보는 대안이 아니고 그 답은 이미 "유지"다.
+    - **시간**이 MERGE_GAP_SEC 이내면 같은 지점. 문구 비교는 정형구 때문에 샌다
+      (장면41: 해설 동일·화면만 미세하게 달라 둘 다 남았다). 시간은 새지 않는다.
     """
     seen: set[tuple] = set()
+    kept: list[float] = []
     out = []
     for c in cands:
         s = _sig(c)
         if s == drop_sig or s in seen:
             continue
+        if near is not None and any(abs(c["sec"] - k) <= near for k in kept):
+            continue
         seen.add(s)
+        kept.append(c["sec"])
         out.append(c)
     return out
 
@@ -132,7 +148,8 @@ def start_candidates(clip: dict, segs: list[dict], pitches: list[tuple[int, int]
     lo, hi = cs - START_MAX_BACK_SEC, min(cs + START_MAX_FWD_SEC, ce - MIN_CLIP_SEC)
 
     def near(sec: float) -> bool:
-        return lo <= sec <= hi and abs(sec - cs) >= 1      # 현재 시작 자신은 후보가 아니다
+        # 현재 시작과 MERGE_GAP_SEC 이내면 같은 지점이라 대안이 아니다.
+        return lo <= sec <= hi and abs(sec - cs) >= MERGE_GAP_SEC
 
     out: list[tuple[float, str]] = []
     for ps, _pe in pitches:                       # ① 보드 검출 투구 (분류 없이도 있다)
@@ -199,17 +216,22 @@ def build_rows(clips: list[dict], segs: list[dict], utts: list,
         cur = _ctx(cs, segs, utts)
         at_start = _shot_at(cs, segs)
         cur["at_shot_start"] = bool(at_start and abs(at_start["s"] - cs) <= 1)
-        # 시작: 현재와 구별 불가한 것은 빼고(답이 이미 "유지"다), 나머지는 서명별 1건.
-        # start_candidates 가 현재에 가까운 순이라 남는 건 가장 가까운 대표다.
-        starts = _dedup([{"sec": sec, "why": why, "gap": round(cs - sec),
-                          **_ctx(sec, segs, utts)}
-                         for sec, why in start_candidates(c, segs, pitches)],
-                        drop_sig=_sig(cur))
+        # 시작: 현재와 구별 불가한 것은 빼고(답이 이미 "유지"다), 나머지를 접는다.
+        # 접힐 때 남길 대표는 **현재와 해설이 다른 쪽**을 먼저 본다 — 시간만으로 고르면
+        # 현재의 발화가 아직 이어지는 후보가 이기는데(v200 장면21: 3636 이 3640 을 밀어냄)
+        # 정작 그 플레이를 말하는 건 뒤쪽이다("김성윤의 적시타가 나옵니다").
+        cur_utt = cur.get("utt") or ""
+        cands = [{"sec": sec, "why": why, "gap": round(cs - sec), **_ctx(sec, segs, utts)}
+                 for sec, why in start_candidates(c, segs, pitches)]
+        cands.sort(key=lambda x: ((x.get("utt") or "") == cur_utt, abs(x["sec"] - cs)))
+        starts = sorted(_dedup(cands, drop_sig=_sig(cur), near=MERGE_GAP_SEC),
+                        key=lambda x: abs(x["sec"] - cs))
         # 끝: 서명이 같으면 '발화 끝' 쪽을 남긴다 — 그게 규칙이 고르라는 지점이다.
         raw_ends = [{"sec": sec, "why": why, **_ctx(sec, segs, utts, at_end=True)}
                     for sec, why in end_candidates(c, segs, utts)]
         ends = sorted(_dedup(sorted(raw_ends,
-                                    key=lambda e: (0 if "발화" in e["why"] else 1, e["sec"]))),
+                                    key=lambda e: (0 if "발화" in e["why"] else 1, e["sec"])),
+                             near=MERGE_GAP_SEC),
                       key=lambda e: e["sec"])
         if starts or ends:
             rows.append({"scene_id": c["scene_id"], "tags": c["tags"],
