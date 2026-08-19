@@ -182,7 +182,13 @@ def build_rows(clips: list[dict], segs: list[dict], utts: list,
     return rows
 
 
-_LINE = re.compile(r"장면\s*(\d+)\s*[:：]\s*시작\s*(유지|\d+)\s*끝\s*(유지|\d+)")
+# 숫자 뒤 단위 표기를 허용한다 — 모델마다 다르게 붙인다. Qwen3.8 은 "끝 9303s",
+# Qwen3.6 은 "시작 1342초 끝 1355초" 로 답한다(2026-08-20 전환 실측). 단위를 안 받으면
+# 줄 전체가 매칭에 실패해 **조용히 무시**되고, 로그엔 "경계 이동 0건"으로만 남아
+# 모델 탓인지 파싱 탓인지 구분되지 않는다.
+_UNIT = r"(?:초|s|sec)?"
+_LINE = re.compile(
+    rf"장면\s*(\d+)\s*[:：]\s*시작\s*(유지|\d+){_UNIT}\s*끝\s*(유지|\d+){_UNIT}")
 
 
 def apply(clips: list[dict], rows: list[dict], text: str) -> list[str]:

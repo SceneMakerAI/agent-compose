@@ -251,3 +251,18 @@ def test_bounds_user_attaches_narrative_per_candidate():
     text = bounds_user(rows)
     assert "화면 [투구] 투수가 공을 던진다" in text
     assert "해설" in text
+
+
+def test_apply_accepts_unit_suffix():
+    """숫자 뒤 단위 표기를 허용한다 — 모델마다 다르게 붙인다.
+
+    Qwen3.8 은 "끝 9303s", Qwen3.6 은 "시작 1342초 끝 1355초" 로 답한다(전환 실측).
+    안 받으면 줄 전체가 매칭 실패해 조용히 무시되고 "경계 이동 0건"으로만 남는다.
+    """
+    for text, want in (("장면 1: 시작 유지 끝 128초", 128.0),
+                       ("장면 1: 시작 유지 끝 128s", 128.0),
+                       ("장면 1: 시작 유지 끝 128", 128.0)):
+        c = clip(cs=115.0, ce=120.0)
+        rows = bounds.build_rows([c], SEGS, UTTS, [])
+        bounds.apply([c], rows, text)
+        assert c["cut"]["ce"] == want, text
