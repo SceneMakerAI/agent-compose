@@ -5,6 +5,7 @@ bench4 모듈은 sys.path 주입으로 로드 — 값 복사가 아니라 원본
 bench4 쪽 상수가 바뀌면 이 테스트가 드리프트를 즉시 드러낸다.
 """
 
+import ast
 import importlib
 import sys
 from pathlib import Path
@@ -134,19 +135,51 @@ def test_vocab_tags_synced_with_vision3():
     assert vocab.PLAY_TAGS == tuple(t.name for t in mod.TAGS)   # 프롬프트 어휘 줄 순서
 
 
-def test_vocab_labels_synced_with_vision3():
-    """파생 라벨도 vision3 publish 가 실제로 붙이는 문자열과 등가.
+def _vision3_labels(pub: Path) -> set[str]:
+    """vision3 publish 가 t_scene_baseball.labels 에 넣을 수 있는 문자열 전부.
 
-    태그만 감시하던 탓에 '희생플라이'→'진루타' 개명이 통째로 새어, LABEL_EXTRA_SHOTS
-    키가 죽은 이름으로 남아 진루타 클립이 여운 샷을 못 붙였다 (실측 comp 15·16).
+    labels() 는 `[lab for cond, lab in [(조건, "라벨"), ...] if cond]`,
+    end_labels() 는 리스트 리터럴 + out.append(...) 형태다. 두 함수 안의 문자열을
+    구조로 집어낸다 — 조건절에 섞인 태그명("삼진" 등)까지 긁지 않으려면 위치가
+    필요하다. vision3 가 이 형태를 바꾸면 여기서 빈 집합이 되어 테스트가 깨진다
+    (조용히 통과하는 것보다 낫다).
+    """
+    tree = ast.parse(pub.read_text(encoding="utf-8"))
+    found: set[str] = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef) or fn.name not in ("labels", "end_labels"):
+            continue
+        for node in ast.walk(fn):
+            # (조건, "라벨") 튜플의 두 번째 원소
+            if isinstance(node, ast.Tuple) and len(node.elts) == 2 \
+                    and isinstance(node.elts[1], ast.Constant) \
+                    and isinstance(node.elts[1].value, str):
+                found.add(node.elts[1].value)
+            # out = ["경기 종료"] / out.append("끝내기")
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and node.func.attr == "append" and node.args \
+                    and isinstance(node.args[0], ast.Constant) \
+                    and isinstance(node.args[0].value, str):
+                found.add(node.args[0].value)
+            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.List):
+                found |= {e.value for e in node.value.elts
+                          if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+    return found
+
+
+def test_vocab_labels_synced_with_vision3():
+    """파생 라벨은 vision3 publish 가 실제로 붙이는 문자열과 **양방향** 등가.
+
+    한쪽(우리 것이 저쪽에 있나)만 보면 저쪽에 새로 생긴 라벨을 영원히 못 잡는다:
+    '희생플라이'→'진루타' 개명이 그렇게 새어 LABEL_EXTRA_SHOTS 키가 죽은 이름으로
+    남았고(실측 comp 15·16), 뒤이어 '끝내기'가 같은 구멍으로 빠져 경기 최고 장면이
+    가산점 없이 일반 안타와 동급이 됐다.
     """
     pub = (Path(__file__).resolve().parents[2] / "agent-vision3" / "src" / "sports"
            / "baseball" / "publish" / "__init__.py")
     if not pub.exists():
         pytest.skip("agent-vision3 미존재")
-    src = pub.read_text(encoding="utf-8")
-    missing = [lab for lab in vocab.LABELS if f'"{lab}"' not in src]
-    assert not missing, f"vision3 publish 에 없는 라벨: {missing}"
+    assert _vision3_labels(pub) == set(vocab.LABELS)
 
 
 def test_vocab_validate():
