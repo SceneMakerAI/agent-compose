@@ -101,14 +101,23 @@ def test_coverage_layer_spreads_innings():
     assert {c["inning"] for c in picked} == {"1회 초", "2회 초"}
 
 
-def test_rescue_longest_when_all_over_budget():
-    """전 클립이 예산보다 길면 최단 1건은 담는다 — '장면 없음'으로 끝내지 않는다.
+def test_must_scenes_exceed_budget_on_purpose():
+    """필수 장면은 예산을 넘겨서라도 담는다 — 예산은 목표지 상한이 아니다.
 
     실측(comp 1): v202 '홈런 모음' 예산 60초인데 홈런이 74초 한 건이라 0클립이 나갔다.
+    득점 장면이 빠지는 건 취향이 아니라 결함이라, 이제 넘겨서 담는다.
     """
     clips = [clip(1, 0, 74, tags="홈런", delta=1), clip(2, 100, 190, tags="홈런", delta=1)]
     picked, _d, total = select.choose(clips, {**SPEC, "budget": 60}, {})
-    assert not picked and total == 0
+    assert [c["scene_id"] for c in picked] == [1, 2]
+    assert total > 60
+
+
+def test_rescue_longest_when_nothing_qualifies():
+    """필수도 없고 전부 예산 초과면 최단 1건은 담는다 — '장면 없음'으로 끝내지 않는다."""
+    clips = [clip(1, 0, 74, tags="범타", delta=0), clip(2, 100, 190, tags="범타", delta=0)]
+    picked, _d, _t = select.choose(clips, {**SPEC, "budget": 60}, {})
+    assert not picked
     assert [c["scene_id"] for c in select.rescue_longest(clips, 60)] == [1]
 
 

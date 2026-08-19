@@ -67,10 +67,10 @@ def choose(clips: list[dict], spec: dict, scores: dict[int, dict]) -> tuple[list
     taken: set[int] = set()
     dropped: list[tuple[dict, str]] = []
 
-    def take(c: dict, why: str) -> bool:
+    def take(c: dict, why: str, force: bool = False) -> bool:
         nonlocal total
         d = _dur(c)
-        if total + d > budget:
+        if not force and total + d > budget:
             return False
         picked.append(c)
         taken.add(c["scene_id"])
@@ -79,11 +79,16 @@ def choose(clips: list[dict], spec: dict, scores: dict[int, dict]) -> tuple[list
         return True
 
     # ① 필수 — 사실이 보증하는 장면. 점수 무관, 득점 큰 순.
+    # **예산을 넘겨서라도 담는다** (방침 확정 2026-08-20): 하이라이트에서 득점 장면이
+    # 빠지는 건 취향이 아니라 결함이다. 예산은 목표지 상한이 아니다 — 실측에서 예산
+    # 준수를 얻는 대신 득점 포함률이 71%로 떨어졌고 그 교환은 받아들이지 않는다.
     must = sorted((c for c in clips if is_must(c)),
                   key=lambda c: (-c["score_delta"], -rank.score(c)))
     for c in must:
-        if not take(c, "필수"):
-            dropped.append((c, "필수인데 예산 초과"))
+        take(c, "필수", force=True)
+    if total > budget:
+        log.info("필수 장면만으로 예산 초과 %.0fs/%ds (%d건) — 품질 우선이라 그대로 담는다",
+                 total, budget, len(must))
 
     # ② 질의 — targets 에 걸리는 것. 0점은 제외한다.
     if targets:

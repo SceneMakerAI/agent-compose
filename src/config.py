@@ -68,7 +68,8 @@ class Settings(BaseSettings):
     log_path: str | None = None
     # 편성 1건 = JSON 1개 (노드 입출력·LLM 프롬프트 전문). 빈 값이면 수집 자체를 안 한다.
     # 전역 DEBUG 는 plan user 프롬프트만 5,883자(v201)라 운영 로그를 덮는다.
-    trace_dir: str | None = None
+    # 상대 경로는 레포 루트 기준 — 운영 로그와 섞이지 않게 레포 안에 따로 쌓는다.
+    trace_dir: str | None = "logs/trace"
 
     # --- 개선 단계 스위치 ---
     # 여러 변경을 한꺼번에 넣으면 트레이스로 "무엇이 달라졌나"는 봐도 "어느 변경 때문인가"는

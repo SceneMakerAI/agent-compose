@@ -19,12 +19,20 @@ from log import get_logger
 
 log = get_logger(__name__)
 
+# src/ 의 부모 = 레포 루트. 상대 TRACE_DIR 은 여기 기준으로 푼다.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 class Trace:
     """편성 1회 분량의 수집기. 비활성이면 모든 메서드가 즉시 반환한다."""
 
     def __init__(self, root: str | None, v_id: int, query: str) -> None:
-        self._dir = Path(root) if root else None
+        # 상대 경로는 **레포 루트 기준**으로 푼다 — 서비스의 CWD 에 좌우되면 트레이스가
+        # 어디에 떨어졌는지 찾을 수 없다. 기본값 logs/trace 도 레포 안에 남는다.
+        self._dir = None
+        if root:
+            p = Path(root)
+            self._dir = p if p.is_absolute() else _REPO_ROOT / p
         self._t0 = time.monotonic()
         self._data: dict[str, Any] = {
             "v_id": v_id, "query": query, "nodes": [], "llm": [],
