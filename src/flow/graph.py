@@ -488,7 +488,11 @@ def _apply_endfix(picked: list[dict], rows, text: str) -> list[str]:
     return moved
 
 
-SHOT_MAX = 8          # 패킷에 실을 샷 상한 — 긴 클립도 프롬프트가 폭주하지 않게
+# 패킷에 실을 샷 — 앞뒤를 나눠 잡는다. 앞에서 8개만 자르면 **마지막 샷이 사라지는데**
+# VERIFY_SYSTEM 이 "마지막 샷에 결과가 없으면 문제" 로 판정하라고 지시한다. 8샷 초과
+# 클립이 경기당 8~15건(최대 58샷)이라 전부 오판정 후보였다 (2026-08-20 사전 점검).
+SHOT_HEAD = 5         # 시작 판정용 — 첫 샷이 그 플레이인지 앞 플레이 잔상인지
+SHOT_TAIL = 3         # 끝 판정용 — 결과 화면이 있는지
 UTT_CLIP = 90         # 해설 1건 표기 길이
 
 
@@ -521,10 +525,15 @@ def _packet(inv: Inventory, c: dict) -> str:
                 f"주자 {r['bases']}  {r['away_score']}-{r['home_score']}"
                 + (f"  ({r['hint']})" if r.get("hint") else ""))
 
-    shots = [s for s in inv.segs if s["s"] < ce and s["e"] > cs][:SHOT_MAX]
+    shots = [s for s in inv.segs if s["s"] < ce and s["e"] > cs]
     if shots:
         lines.append("")
-        for s in shots:
+        head, tail = shots[:SHOT_HEAD], shots[-SHOT_TAIL:]
+        skipped = len(shots) - len(head) - len(tail)
+        shown = head + tail if skipped > 0 else shots
+        for i, s in enumerate(shown):
+            if skipped > 0 and i == len(head):
+                lines.append(f"     … (중략 {skipped}샷)")
             lines.append(f"  {s['s']:.0f}s [{s.get('shot_type') or '미분류'}]")
             if s.get("summary"):
                 lines.append(f"     화면 {s['summary']}")
