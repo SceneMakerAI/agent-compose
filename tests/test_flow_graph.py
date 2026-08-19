@@ -140,3 +140,49 @@ def test_render_inventory_survives_missing_transition():
              "score": "", "score_before": None, "s": 0.0, "e": 10.0,
              "outs": None, "bases": None, "away_team": None, "home_team": None}]
     assert "?" in render_inventory(rows)
+
+
+# ── ETC 자막 → 타자 이름 ──────────────────────────────
+
+def test_batter_from_etc_prefers_recent_not_frequent():
+    """직전 타석 자막이 더 많아도 **가장 최근** 이름을 고른다.
+
+    90초 창은 이전 타석까지 물 수 있다 — 최빈으로 고르면 앞 타자가 이긴다
+    (실측 v201 장면 65: 직전 자막은 김동혁인데 최빈은 전민재).
+    """
+    from flow.players import batter_of
+
+    rows = [(100, "2026 전민재 .251 / 3홈런 20타점"),
+            (105, "2026 전민재 .251 / 3홈런 20타점"),
+            (110, "2026 전민재 .251 / 3홈런 20타점"),
+            (150, "2026 김동혁 .200 ▶ 3안타 9득점"),
+            (155, "2026 김동혁 .200 ▶ 3안타 9득점")]
+    assert batter_of(rows, 160.0) == "김동혁"
+
+
+def test_batter_skips_pitcher_lines():
+    """투수 성적 줄의 주어는 타자가 아니다 — 경기 초반 선발 소개 자막 방어."""
+    from flow.players import batter_of
+
+    rows = [(10, "▶ 김진욱 6일 만의 등판(7.25 vs 두산 승)"),
+            (20, "▶ 김진욱 통산 사직 14G 5승 2패 2.59"),
+            (40, "2026 김현준 .267 / 7홈런 40타점"),
+            (45, "2026 김현준 .267 / 7홈런 40타점")]
+    assert batter_of(rows, 50.0) == "김현준"
+
+
+def test_batter_excludes_crew_and_teams():
+    """중계진·팀명은 이름이 아니다. 근거가 없으면 None (억지로 채우지 않는다)."""
+    from flow.players import batter_of
+
+    rows = [(10, "캐스터 김수환 해설 민병헌"), (20, "캐스터 김수환 해설 민병헌"),
+            (30, "시즌 전적 6승 2패 NC 우세")]
+    assert batter_of(rows, 40.0) is None
+
+
+def test_batter_pair_line_takes_batter():
+    """'P 투수 / 번호 타자' 형태는 뒤쪽(타자)을 고른다."""
+    from flow.players import batter_of
+
+    rows = [(10, "P 정철원 / 7 전병우 .229 2/3"), (15, "P 정철원 / 7 전병우 .229 2/3")]
+    assert batter_of(rows, 20.0) == "전병우"

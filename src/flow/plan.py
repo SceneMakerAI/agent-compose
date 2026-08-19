@@ -47,7 +47,7 @@ def render_inventory(scenes: list[dict]) -> str:
         sit = render_situation(r.get("outs"), r.get("bases"))
         lines.append(
             f"{r['scene_id']:3d}  {r['scene_type']:14s} {r['labels'] or '-':10s} "
-            f"{r['inning'] or '?':7s} {sit:12s} {score:18s}"
+            f"{r['inning'] or '?':7s} {sit:12s} {score:18s} {r.get('batter') or '-':6s}"
             f"  {r['e'] - r['s']:.0f}s")
     return "\n".join(lines)
 

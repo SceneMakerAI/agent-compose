@@ -64,6 +64,23 @@ class SourceRepo:
             r["label_list"] = r["labels"].split(",") if r["labels"] else []
         return rows
 
+    async def fetch_etc(self, v_id: int) -> list[tuple[int, str]]:
+        """
+        Summary:
+            하단 자막 판독문(kind='ETC') 전량 — 장면별 타자 이름 재료.
+        Returns:
+            list[tuple[int, str]]: (초, 자막) 시간순.
+        Description:
+            - 자막은 타석 준비 중에 뜨고 발행 장면은 플레이 순간만 담아 시간이 겹치지 않는다
+              (v201 실측 865건 중 겹침 18%) — 그래서 겹침이 아니라 장면 직전 구간에서 모은다.
+              판정은 flow.players 가 한다 (여기는 원문만 준다).
+        """
+        sql = ("SELECT idx_sec, txt FROM t_frame_baseball_board_detail "
+               "WHERE v_id = %s AND kind = 'ETC' AND txt <> '' ORDER BY idx_sec")
+        async with self._db.acquire() as conn, conn.cursor(cursor=DictCursor) as cur:
+            await cur.execute(sql, (v_id,))
+            return [(int(r["idx_sec"]), r["txt"]) for r in await cur.fetchall()]
+
     async def fetch_shots(self, v_id: int) -> list[dict]:
         """
         Summary:

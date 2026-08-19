@@ -27,6 +27,7 @@ from db.status_repo import (
     COMPOSE_VERIFY,
 )
 from flow import plan as plan_mod
+from flow import players
 from flow.graph import run_compose
 from flow.state import Inventory
 from log import bind_v_id, get_logger
@@ -120,6 +121,8 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
     
     segs = [{"seg_id": i, **r} for i, r in enumerate(await repo.fetch_shots_all(req.v_id), 1)]
     utts = tuple(await repo.fetch_utterances(req.v_id))
+    # 타자 이름은 하단 자막에서 — 선수 질의를 벡터 검색이 아니라 인벤토리로 풀기 위한 재료
+    players.annotate_batters(scenes, await repo.fetch_etc(req.v_id))
     parts = scenes[0]["score"].split()
     inv = Inventory(
         v_id=req.v_id, scenes=tuple(scenes), segs=tuple(segs), utts=utts,

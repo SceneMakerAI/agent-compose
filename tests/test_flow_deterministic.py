@@ -212,7 +212,7 @@ def test_prompts_byte_equal_bench4(bench4):
     u_theirs = b4p.plan_user("q", "g", "inv", 180, "fb", "ev").splitlines()
     u_diff = [(a, b) for a, b in zip(u_theirs, u_ours) if a != b]
     assert len(u_ours) == len(u_theirs)
-    assert [b for _, b in u_diff] == ["번호  태그  라벨  이닝  상황(아웃·주자)  점수(전→후)  길이"]
+    assert [b for _, b in u_diff] == ["번호  태그  라벨  이닝  상황(아웃·주자)  점수(전→후)  타자  길이"]
     rows = [(7, 100, [(95.0, 104.2, "발화")])]
     assert prompts.endfix_user(rows) == b4p.endfix_user(rows)
     assert prompts.verify_user("스펙", "패킷") == b4p.verify_user("스펙", "패킷")
