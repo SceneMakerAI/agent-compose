@@ -140,6 +140,8 @@ curl -X POST localhost:8084/api/v1/render \
 - `bumper`(기본 true): 이닝 그룹 사이 범퍼 삽입 (워커 필드는 `bumper_yn`, 워커 기본값 false).
 - `force`(기본 false): 이미 렌더된 편성을 다시 렌더 (범퍼 변경 등 운영용).
 - 접수 시 `t_compose.bumper_yn`(실제 사용값), 완료 확인 시 `render_datetime`(완료 시각)을 기록.
+  `bumper_yn` 은 **NULL = 렌더 요청된 적 없음** — 입력이 아니라 기록이라 기본값을 두지 않는다
+  (기본 1 이면 미렌더 편성도 "범퍼 켜고 렌더됨"으로 읽힌다).
   **실패는 완료 시각을 남기지 않는다** — 실패가 편성을 영구히 잠그면 안 되므로 재렌더가 열려 있다.
   → 소비 측 계약: `render_datetime IS NULL` = 미렌더(렌더 버튼 노출), NOT NULL = 영상 준비됨.
 - 사전 차단 (worker 호출 전 이쪽에서 거른다):
