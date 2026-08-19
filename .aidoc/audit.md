@@ -238,10 +238,11 @@ API 응답 `suspicions` 에 실린다. plan 의 선곡은 ghost 제거·경고�
 이후 렌더는 409 로 영구 차단된다(force 를 아는 운영자만 탈출). `_watch`/`get_render` 는
 `== "done"` 을 쓴다 — **같은 판정에 기준이 둘**인 것 자체가 신호.
 
-### 7-4. force 재렌더 중 GET 이 옛 완료 시각으로 "done" 을 답한다 [코드확인]
+### 7-4. force 재렌더 중 GET 이 옛 완료 시각으로 "done" 을 답한다 — **조치 완료** (`445a1e0`)
 `force=True` 가 `render_datetime` 을 비우지 않아, 재렌더 수 분 동안 GET 이 즉시 단락되어
-이전 `rendered_at` 과 함께 `status:"done"` 을 돌려준다. 뷰어가 덮어써지는 중인 파일을 튼다.
-README 의 "`render_datetime` NOT NULL = 영상 준비됨" 계약이 이 구간에서 깨진다.
+이전 `rendered_at` 과 함께 `status:"done"` 을 돌려줬다. 뷰어가 덮어써지는 중인 파일을 튼다.
+→ DB 지름길 조건에 `comp_id not in _RENDERING` 을 붙여, 진행 중이면 워커에 직접 묻는다.
+README 의 "`render_datetime` NOT NULL = 영상 준비됨" 계약이 이제 진행 중 구간에서도 유지된다.
 
 ### 7-5. 원샷 경로의 DB 예외가 편성 성공을 error 로 뒤집는다 [코드확인]
 `try` 가 `httpx.HTTPError` 만 잡는다. `st.status.set` 은 예외를 삼키지만
