@@ -14,7 +14,8 @@ class StubLLM:
     def __init__(self, by_name: dict | None = None, **kw):
         self.by_name = dict(by_name or {}, **kw)
 
-    async def chat(self, system, user, thinking=False, trace=None, name=""):
+    async def chat(self, system, user, thinking=False, trace=None, name="",
+                   think_max=None):
         base = name.split("[")[0]
         return self.by_name.get(base, DEFAULTS.get(base, ""))
 
@@ -110,10 +111,13 @@ class CapturingLLM(StubLLM):
     def __init__(self, by_name: dict | None = None, **kw):
         super().__init__(by_name, **kw)
         self.calls: list[tuple[str, str, str]] = []
+        self.think_max: list[tuple[str, int | None]] = []
 
-    async def chat(self, system, user, thinking=False, trace=None, name=""):
+    async def chat(self, system, user, thinking=False, trace=None, name="",
+                   think_max=None):
         self.calls.append((system, user, name))
-        return await super().chat(system, user, thinking, trace, name)
+        self.think_max.append((name, think_max))
+        return await super().chat(system, user, thinking, trace, name, think_max)
 
     def prompt_of(self, call: str) -> tuple[str, str]:
         """해당 콜의 (system, user) — 노드 순서가 바뀌어도 이름으로 찾는다."""
@@ -143,6 +147,27 @@ async def test_bounds_and_verify_fan_out_per_clip():
     # 프롬프트에는 자기 클립만 실린다 (남의 장면이 섞이면 나눈 의미가 없다)
     _sys, user = next((s, u) for s, u, n in llm.calls if n == "verify[1]")
     assert "[1]" in user and "[2]" not in user
+
+
+async def test_fanout_calls_carry_thinking_cap():
+    """팬아웃 콜만 thinking 상한을 받는다 — plan 은 상한 없이 그대로.
+
+    상한이 안 실리면 폭주 1건이 배치를 붙잡는다 (v201 comp9: bounds 중앙값 2,781자인데
+    한 콜이 59,501자·422초). 값은 송신 인자라 응답으로는 확인되지 않는다.
+    """
+    from flow.llm import MAX_TOKENS_PICK
+
+    inv = Inventory(v_id=999, scenes=SCENES, segs=SEGS,
+                    utts=((118.0, 124.0, "넘어갑니다"), (212.0, 218.0, "잡아냅니다")),
+                    game_line="g", inventory_text="(목록)",
+                    pitches={1: [(96, 97)], 2: [(196, 197)]})
+    llm = CapturingLLM()
+    g = build_graph(llm, StubEmb(), StubStore())
+    await run_compose(g, inv, "안타 모음", 300)
+    caps = dict(llm.think_max)
+    assert caps["bounds[1]"] == MAX_TOKENS_PICK
+    assert caps["verify[1]"] == MAX_TOKENS_PICK
+    assert caps["plan"] is None                 # 인벤토리 전체 판단 — 상한 두지 않는다
 
 
 async def test_caller_budget_reaches_plan_prompt():
