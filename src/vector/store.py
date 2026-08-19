@@ -50,21 +50,46 @@ class VectorStore:
         def _ensure() -> bool:
             if self._mc.has_collection(self._col):
                 return False
-            schema = self._mc.create_schema(auto_id=True)
-            schema.add_field("id", DataType.INT64, is_primary=True)
-            schema.add_field("v_id", DataType.INT64)
-            schema.add_field("kind", DataType.VARCHAR, max_length=8)
-            schema.add_field("s", DataType.FLOAT)
-            schema.add_field("e", DataType.FLOAT)
-            schema.add_field("scene_id", DataType.INT64)
-            schema.add_field("h_id", DataType.INT64)
-            schema.add_field("shot_type", DataType.VARCHAR, max_length=16)
-            schema.add_field("tags", DataType.VARCHAR, max_length=64)
-            schema.add_field("labels", DataType.VARCHAR, max_length=64)
-            schema.add_field("score_delta", DataType.INT16)
-            schema.add_field("inning", DataType.VARCHAR, max_length=8)
-            schema.add_field("text", DataType.VARCHAR, max_length=1024)
-            schema.add_field("vector", DataType.FLOAT_VECTOR, dim=EMBED_DIM)
+            # description 은 Attu 등 관리 도구에서 필드 의미를 읽는 유일한 통로다
+            # (스키마만 보면 무슨 값인지 알 수 없다는 실측 — 2026-08-20).
+            # 기존 컬렉션에는 소급되지 않는다: 반영하려면 drop 후 재색인해야 한다.
+            schema = self._mc.create_schema(
+                auto_id=True,
+                description="장면 증거 — 해설(stt)·화면 캡션(shot)·하단 자막(etc) 통합 색인")
+            schema.add_field("id", DataType.INT64, is_primary=True,
+                             description="자동 발급 PK (의미 없음)")
+            schema.add_field("v_id", DataType.INT64,
+                             description="t_video.v_id — 검색은 항상 이 값으로 범위를 좁힌다")
+            schema.add_field("kind", DataType.VARCHAR, max_length=8,
+                             description="증거 종류: stt=해설 대사 / shot=화면 캡션 / etc=하단 자막 OCR")
+            schema.add_field("s", DataType.FLOAT,
+                             description="증거 시작 초 (영상 기준)")
+            schema.add_field("e", DataType.FLOAT,
+                             description="증거 끝 초")
+            schema.add_field("scene_id", DataType.INT64,
+                             description="귀속 장면 t_scene_baseball.scene_id — 겹침 최대 장면. "
+                                         "겹치는 장면이 없으면 -1(orphan)")
+            schema.add_field("h_id", DataType.INT64,
+                             description="귀속 장면의 t_play_baseball.h_id — 원장 역추적용. "
+                                         "orphan 이면 -1")
+            schema.add_field("shot_type", DataType.VARCHAR, max_length=16,
+                             description="kind=shot 일 때 그 샷의 유형(투구·타구·수비·주루·리액션 등). "
+                                         "그 외 kind 는 빈 문자열")
+            schema.add_field("tags", DataType.VARCHAR, max_length=64,
+                             description="귀속 장면의 행위 태그 쉼표 나열(안타·홈런·범타 등) — "
+                                         "색인 시점 t_scene_baseball.scene_type 사본")
+            schema.add_field("labels", DataType.VARCHAR, max_length=64,
+                             description="귀속 장면의 파생 라벨 쉼표 나열(역전·적시타·병살 등) — "
+                                         "색인 시점 사본. orphan 은 빈 문자열")
+            schema.add_field("score_delta", DataType.INT16,
+                             description="귀속 장면에서 난 득점 수 (0이면 무득점)")
+            schema.add_field("inning", DataType.VARCHAR, max_length=8,
+                             description="귀속 장면의 이닝 '{N}회 {초|말}' — 8바이트 한도라 "
+                                         "10회 이상은 절단된다(연장 미검증)")
+            schema.add_field("text", DataType.VARCHAR, max_length=1024,
+                             description="증거 원문 — 이 필드만 임베딩된다. 1024바이트에서 절단")
+            schema.add_field("vector", DataType.FLOAT_VECTOR, dim=EMBED_DIM,
+                             description="text 의 임베딩 (Qwen3-Embedding-4B, COSINE)")
             idx = self._mc.prepare_index_params()
             idx.add_index("vector", index_type="AUTOINDEX", metric_type="COSINE")
             self._mc.create_collection(self._col, schema=schema, index_params=idx)
