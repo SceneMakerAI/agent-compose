@@ -266,3 +266,41 @@ def test_apply_accepts_unit_suffix():
         rows = bounds.build_rows([c], SEGS, UTTS, [])
         bounds.apply([c], rows, text)
         assert c["cut"]["ce"] == want, text
+
+
+# ── 중복 후보 병합 ─────────────────────────────────────
+
+# 90~130 은 한 투구 샷 + 한 발화 → 그 안의 후보들은 서로 구별되지 않는다.
+# 130~170 은 다른 샷 + 다른 발화 → 현재 시작을 여기 두면 후보와 구별된다.
+_SEGS2 = [{"s": 90.0, "e": 130.0, "shot_type": "투구", "summary": "투수가 공을 던진다"},
+          {"s": 130.0, "e": 170.0, "shot_type": "리액션", "summary": "타자가 걸어간다"}]
+_UTTS2 = [(90.0, 130.0, "같은 문장이 계속된다"), (130.0, 170.0, "다른 문장이다")]
+
+
+def test_indistinguishable_start_candidates_are_merged():
+    """화면·해설이 같은 시작 후보는 하나로 — 고를 근거가 없으면 사고만 태운다.
+
+    실측(v200 comp16 장면61): 후보 11397·11394·11392 의 해설이 글자 그대로 같았고
+    화면은 아예 없었다. thinking 94,575자를 쓰고 본문 없이 재시도로 떨어졌다.
+    반면 후보 5개가 전부 다른 해설을 단 장면11 은 4,343자로 즉결이었다.
+    """
+    c = clip(cs=135.0, ce=175.0)
+    rows = bounds.build_rows([c], _SEGS2, _UTTS2, [(100, 101), (110, 111), (120, 121)])
+    assert len(rows[0]["starts"]) == 1, rows[0]["starts"]
+
+
+def test_start_candidate_same_as_current_is_dropped():
+    """현재와 화면·해설이 같은 후보는 대안이 아니다 — 그 답은 이미 '유지'다."""
+    c = clip(cs=110.0, ce=160.0)          # 110 은 90~130 투구 샷 안
+    rows = bounds.build_rows([c], _SEGS2, _UTTS2, [(115, 116)])   # 같은 샷·같은 발화
+    assert rows and rows[0]["starts"] == [], rows[0]["starts"]
+
+
+def test_dedup_keeps_speech_end_over_screen():
+    """끝 후보가 겹치면 '발화 끝' 쪽을 남긴다 — 규칙이 고르라는 지점이다."""
+    segs = [{"s": 120.0, "e": 133.0, "shot_type": "리액션", "summary": "같은 화면"},
+            {"s": 133.0, "e": 136.0, "shot_type": "리액션", "summary": "같은 화면"}]
+    utts = [(120.0, 136.0, "같은 해설")]
+    got = bounds.build_rows([clip(cs=100.0, ce=130.0)], segs, utts, [])
+    whys = [e["why"] for e in got[0]["ends"]]
+    assert any("발화" in w for w in whys), whys

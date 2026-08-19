@@ -92,6 +92,35 @@ def _ctx(sec: float, segs: list[dict], utts: list, at_end: bool = False) -> dict
             "utt": _utt_at(sec, utts, at_end=at_end)}
 
 
+def _sig(ctx: dict) -> tuple:
+    """후보의 변별 서명 — 모델에게 보이는 것(화면·해설)만으로 만든다.
+
+    초 값이 달라도 화면·해설이 같으면 모델 입장에선 **같은 선택지**다. 고를 근거가
+    프롬프트 안에 없으니 판별자를 찾다가 사고가 폭주한다 — v200 comp16 실측:
+    장면61 의 후보 11397·11394·11392 는 해설이 글자 그대로 같았고(화면은 아예 없음)
+    thinking 94,575자를 태운 뒤 본문 없이 재시도로 떨어졌다. 반면 후보 5개가 전부
+    다른 해설을 단 장면11 은 4,343자로 즉결이었다 — **개수가 아니라 변별력**이다.
+    """
+    return (ctx.get("shot_type") or "", ctx.get("shot") or "", ctx.get("utt") or "")
+
+
+def _dedup(cands: list[dict], drop_sig: tuple | None = None) -> list[dict]:
+    """서명이 같은 후보는 앞선 것 하나만. drop_sig 와 같은 것은 통째로 뺀다.
+
+    drop_sig 는 '현재'의 서명이다 — 현재와 화면·해설이 같은 후보는 대안이 아니라
+    같은 지점의 다른 표기이고, 그 답은 이미 "유지"다.
+    """
+    seen: set[tuple] = set()
+    out = []
+    for c in cands:
+        s = _sig(c)
+        if s == drop_sig or s in seen:
+            continue
+        seen.add(s)
+        out.append(c)
+    return out
+
+
 def start_candidates(clip: dict, segs: list[dict], pitches: list[tuple[int, int]]) -> list:
     """시작 후보 [(초, 설명)] — 앞뒤 양쪽. 클립이 너무 짧아지는 뒤쪽 값은 뺀다.
 
@@ -167,15 +196,22 @@ def build_rows(clips: list[dict], segs: list[dict], utts: list,
     rows = []
     for c in clips:
         cs, ce = c["cut"]["cs"], c["cut"]["ce"]
-        starts = [{"sec": sec, "why": why, "gap": round(cs - sec),
-                   **_ctx(sec, segs, utts)}
-                  for sec, why in start_candidates(c, segs, pitches)]
-        ends = [{"sec": sec, "why": why, **_ctx(sec, segs, utts, at_end=True)}
-                for sec, why in end_candidates(c, segs, utts)]
+        cur = _ctx(cs, segs, utts)
+        at_start = _shot_at(cs, segs)
+        cur["at_shot_start"] = bool(at_start and abs(at_start["s"] - cs) <= 1)
+        # 시작: 현재와 구별 불가한 것은 빼고(답이 이미 "유지"다), 나머지는 서명별 1건.
+        # start_candidates 가 현재에 가까운 순이라 남는 건 가장 가까운 대표다.
+        starts = _dedup([{"sec": sec, "why": why, "gap": round(cs - sec),
+                          **_ctx(sec, segs, utts)}
+                         for sec, why in start_candidates(c, segs, pitches)],
+                        drop_sig=_sig(cur))
+        # 끝: 서명이 같으면 '발화 끝' 쪽을 남긴다 — 그게 규칙이 고르라는 지점이다.
+        raw_ends = [{"sec": sec, "why": why, **_ctx(sec, segs, utts, at_end=True)}
+                    for sec, why in end_candidates(c, segs, utts)]
+        ends = sorted(_dedup(sorted(raw_ends,
+                                    key=lambda e: (0 if "발화" in e["why"] else 1, e["sec"]))),
+                      key=lambda e: e["sec"])
         if starts or ends:
-            cur = _ctx(cs, segs, utts)
-            at_start = _shot_at(cs, segs)
-            cur["at_shot_start"] = bool(at_start and abs(at_start["s"] - cs) <= 1)
             rows.append({"scene_id": c["scene_id"], "tags": c["tags"],
                          "inning": c.get("inning") or "", "cs": cs, "ce": ce,
                          "cur": cur, "starts": starts, "ends": ends})
