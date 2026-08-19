@@ -52,7 +52,11 @@ PLAN_SYSTEM = f"""\
 def plan_user(
     query: str, game_line: str, inventory: str, budget: int, feedback: str = "", evidence_block: str = ""
 ) -> str:
-    """plan 유저 프롬프트 — 경기 한 줄 + 인벤토리 + (벡터 후보) + (피드백) + 질의."""
+    """plan 유저 프롬프트 — 경기 한 줄 + 인벤토리 + (벡터 후보) + (피드백) + 질의.
+
+    budget 은 본문에 렌더하지 않는다 — 예산은 PLAN_SYSTEM 의 {budget} 자리가 전달한다
+    (bench4 byte 등가 대상이라 본문 구성은 고정). 인자는 호출부 대칭을 위해 남긴다.
+    """
     fb = f"\n[이전 시도 피드백]\n{feedback}\n" if feedback else ""
     ev = f"\n{evidence_block}\n" if evidence_block else ""
     return f"""[경기]

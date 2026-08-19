@@ -66,3 +66,41 @@ async def test_backfill_then_endfix_and_perclip_suspicion():
     assert st["total"] == sum(r["cut"]["ce"] - r["cut"]["cs"] for r in st["picked"])  # A3
     assert st["suspicions"] == [(2, "관점 위반 테스트")]              # A2
     assert all("cut" not in s for s in SCENES)                       # B4 인벤토리 불변
+
+
+class CapturingLLM(StubLLM):
+    """system/user 프롬프트를 보존하는 스텁 — 배선 검증용."""
+
+    def __init__(self, answers):
+        super().__init__(answers)
+        self.calls: list[tuple[str, str]] = []
+
+    async def chat(self, system, user, thinking=False):
+        self.calls.append((system, user))
+        return await super().chat(system, user, thinking)
+
+
+async def test_caller_budget_reaches_plan_prompt():
+    """호출자 예산이 plan 프롬프트에 실제로 실린다.
+
+    기본값(180)만 보내던 배선 탓에 900s 요청에도 모델이 "예산: 180"으로 답하며 그
+    전제로 선곡했다 (2026-08-19 실측). 프롬프트 문자열까지 확인해야 잡히는 종류라
+    응답 파싱이 아니라 송신 내용을 본다.
+    """
+    llm = CapturingLLM([PLAN_OK, VERIFY_OK])
+    g = build_graph(llm, StubEmb(), StubStore())
+    await run_compose(g, INV, "안타 모음", 900)
+    plan_system = llm.calls[0][0]
+    assert "900" in plan_system
+    assert "{budget}" not in plan_system            # 치환 누락 방지
+    assert str(180) not in plan_system.split("예산(초)이")[1][:80]   # 기본값 잔존 금지
+
+
+async def test_budget_omitted_falls_back_to_default():
+    """예산 미지정이면 기본값이 그대로 프롬프트에 실린다."""
+    from flow import plan as plan_mod
+
+    llm = CapturingLLM([PLAN_OK, VERIFY_OK])
+    g = build_graph(llm, StubEmb(), StubStore())
+    await run_compose(g, INV, "안타 모음", None)
+    assert str(plan_mod.DEFAULT_BUDGET_SEC) in llm.calls[0][0]

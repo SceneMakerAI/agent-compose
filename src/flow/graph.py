@@ -52,16 +52,19 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore):
 
     async def plan_node(st: ComposeState) -> dict:
         inv = st["inv"]
+        # 호출자 예산을 LLM 에게도 알린다 — 기본값만 보내던 탓에 900s 요청에도 모델이
+        # "예산: 180" 으로 답하며 그 전제로 선곡했다 (2026-08-19 실측 로그).
+        budget = st.get("budget") or plan.DEFAULT_BUDGET_SEC
         text = await llm.chat(
-            prompts.PLAN_SYSTEM.replace("{budget}", str(plan.DEFAULT_BUDGET_SEC)),
+            prompts.PLAN_SYSTEM.replace("{budget}", str(budget)),
             prompts.plan_user(
-                st["query"], 
-                inv.game_line, 
-                inv.inventory_text, 
-                plan.DEFAULT_BUDGET_SEC, 
-                st.get("feedback", ""), 
+                st["query"],
+                inv.game_line,
+                inv.inventory_text,
+                budget,
+                st.get("feedback", ""),
                 plan.render_evidence(
-                    st.get("evidence", []), 
+                    st.get("evidence", []),
                     st.get("evidence_orphan", [])
                 )
             ),
