@@ -98,6 +98,28 @@ class SourceRepo:
                 ]
         return out
 
+    async def fetch_transitions(self, v_id: int) -> list[dict]:
+        """
+        Summary:
+            전광판 전이 전량 — verify 가 클립 구간에 겹치는 것만 골라 쓴다.
+        Description:
+            해설(STT)은 음성 인식이라 오인식이 섞인다 — v201 장면9 대사에는 2회인데
+            "볼카운트는 5회초"가 들어 있다. 전이는 판독으로 확정된 사실이라
+            그 오인식을 이기는 근거가 된다. hint 는 board 가 붙인 변화 요약
+            (득점+1·아웃+1 등)이다.
+        Returns:
+            list[dict]: {sec, inning, half, outs, balls, strikes, bases,
+                         away_score, home_score, hint} 시간순.
+        """
+        sql = (
+            "SELECT sec, inning, half, outs, balls, strikes, bases, "
+            "       away_score, home_score, hint "
+            "FROM t_transition_baseball WHERE v_id = %s ORDER BY sec"
+        )
+        async with self._db.acquire() as conn, conn.cursor(cursor=DictCursor) as cur:
+            await cur.execute(sql, (v_id,))
+            return list(await cur.fetchall())
+
     async def fetch_shots(self, v_id: int) -> list[dict]:
         """
         Summary:

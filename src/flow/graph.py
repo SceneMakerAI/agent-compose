@@ -208,7 +208,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             try:
                 text = await llm.chat(
                     prompts.VERIFY_SYSTEM,
-                    prompts.verify_user(spec_line, _packets(st["inv"], [c])),
+                    prompts.verify_user(st["query"], spec_line, _packet(st["inv"], c)),
                     thinking=True, trace=st.get("trace"),
                     name=f"verify[{c['scene_id']}]",
                 )
@@ -419,22 +419,47 @@ def _apply_endfix(picked: list[dict], rows, text: str) -> list[str]:
     return moved
 
 
-def _packets(inv: Inventory, clips: list[dict]) -> str:
-    """채택 클립들 → 검수 패킷 텍스트 (bench4 verify.packets — DB 재조회 대신 인벤토리).
+SHOT_MAX = 8          # 패킷에 실을 샷 상한 — 긴 클립도 프롬프트가 폭주하지 않게
+UTT_CLIP = 90         # 해설 1건 표기 길이
 
-    대사는 장면 전체 구간에서 — 잘린 클립(투구 샷 3초)으로 좁히면 이웃 플레이 해설이
-    섞여 증거가 오염된다 (실측: 삼진 22건 전멸 오기각의 한 원인).
+
+def _packet(inv: Inventory, c: dict) -> str:
+    """클립 1건 → 검수 패킷. **시각 한 축**으로 전광판·화면·해설을 정렬한다.
+
+    예전에는 화면 유형을 화살표로 나열하고(`투구 → 타구·수비 → …`) 대사를 따로 이어
+    붙였다. 어느 해설이 어느 화면의 것인지 알 수 없어 "무슨 일이 일어났나"가 안 읽혔고,
+    유형명만으로는 첫 샷이 그 플레이인지 앞 플레이 잔상인지 갈리지 않았다
+    (v201 장면9: 첫 샷이 앞 타구의 "야수가 공을 쫓아 걷고 있다"인데 완결성 '정상').
+
+    구간은 **컷 좌표**로 잡는다 — 장면 전체로 넓히면 이웃 플레이가 섞인다.
     """
-    lines = []
-    for c in clips:
-        shots = " → ".join(t or "미분류" for _, _, t in c["cut"]["shots"][:6]) or "-"
-        overlap = [t for us, ue, t in inv.utts if us < c["e"] and ue > c["s"]]
-        stt = " / ".join(overlap[:3])[:200]            # bench4 LIMIT 3 등가
-        
-        lines.append(
-            f"[{c['scene_id']}] {c['scene_type']} ({c['labels'] or '라벨없음'}) "
-            f"{c['inning']} {c['score_before']}→{c['score'].split()[1]}\n"
-            f"    화면: {shots}\n"
-            f"    대사: {stt or '(없음)'}"
-        )
+    cs, ce = c["cut"]["cs"], c["cut"]["ce"]
+    away = (c.get("score") or " ").split()[0] if c.get("score") else ""
+    head = (f"[클립] {c['scene_id']} · {c['scene_type']}"
+            f"({c['labels'] or '라벨없음'}) · {c['inning']} · {cs:.0f}~{ce:.0f}s "
+            f"({ce - cs:.0f}s)\n"
+            f"       {away} {c['score_before']} → {away} {c['score'].split()[1]}"
+            if c.get("score") else f"[클립] {c['scene_id']}")
+
+    lines = [head]
+    tr = [r for r in inv.trans if cs - 20 <= r["sec"] <= ce]
+    if tr:
+        lines.append("")
+        lines.append("  전광판")
+        for r in tr:
+            lines.append(
+                f"    {r['sec']}s  {r['outs']}사 {r['balls']}볼{r['strikes']}스 "
+                f"주자 {r['bases']}  {r['away_score']}-{r['home_score']}"
+                + (f"  ({r['hint']})" if r.get("hint") else ""))
+
+    shots = [s for s in inv.segs if s["s"] < ce and s["e"] > cs][:SHOT_MAX]
+    if shots:
+        lines.append("")
+        for s in shots:
+            lines.append(f"  {s['s']:.0f}s [{s.get('shot_type') or '미분류'}]")
+            if s.get("summary"):
+                lines.append(f"     화면 {s['summary']}")
+            utt = next((x for us, ue, x in inv.utts if us < s["e"] and ue > s["s"]), "")
+            if utt:
+                lines.append(f'     해설 "{utt[:UTT_CLIP]}"')
     return "\n".join(lines)

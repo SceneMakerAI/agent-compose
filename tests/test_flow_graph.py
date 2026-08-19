@@ -142,7 +142,8 @@ async def test_bounds_and_verify_fan_out_per_clip():
     assert sorted(llm.names_of("verify")) == ["verify[1]", "verify[2]"]
     # 프롬프트에는 자기 클립만 실린다 (남의 장면이 섞이면 나눈 의미가 없다)
     _sys, user = next((s, u) for s, u, n in llm.calls if n == "verify[1]")
-    assert "[1]" in user and "[2]" not in user
+    assert "[클립] 1 " in user and "[클립] 2 " not in user
+    assert "[질의] 안타 모음" in user            # 질의가 실려야 채점 기준이 선다
 
 
 async def test_caller_budget_reaches_plan_prompt():
