@@ -13,14 +13,41 @@ log = get_logger(__name__)
 DEFAULT_BUDGET_SEC = 180    # 질의·인자에 예산이 없을 때 (bench4 운영값)
 
 
+def render_situation(outs: int | None, bases: str | None) -> str:
+    """전광판 아웃·주자 → '1사 1·2루' 표기. 값이 없으면 '?'.
+
+    라벨로 표현되지 않는 유일한 정보라 인벤토리의 핵심 열이다 — 같은 범타라도
+    '2사 만루'(위기 탈출)와 '무사 주자없음'(평범한 아웃)은 하이라이트 가치가 다른데
+    둘 다 score_delta=0 이라 점수로도 갈리지 않는다.
+    """
+    if outs is None or bases is None:
+        return "?"
+    on = [n for n, b in zip(("1루", "2루", "3루"), str(bases)) if b == "1"]
+    if len(on) == 3:
+        runners = "만루"
+    elif on:
+        runners = "·".join(on)
+    else:
+        runners = "주자없음"
+    return f"{outs}사 {runners}"
+
+
 def render_inventory(scenes: list[dict]) -> str:
-    """t_scene_baseball 행 → plan 이 보는 목록 한 줄씩 (경기 단위라 전 행 — 2~3KB)."""
+    """t_scene_baseball 행 → plan 이 보는 목록 한 줄씩 (경기 단위라 전 행 — 2~3KB).
+
+    점수에 원정팀명을 붙인다 — 가운데 토막만 떼면(`9-7`) 모델이 매 행마다
+    초/말 → 원정/홈 → 팀명 → 어느 쪽이 올랐나를 3단 추론해야 한다.
+    """
     lines = []
     for r in scenes:
         before = r["score_before"] or "?"
+        cur = r["score"].split()[1] if r["score"] else "?"
+        away = r.get("away_team") or ""
+        score = f"{away} {before}→{cur}" if away else f"{before}→{cur}"
+        sit = render_situation(r.get("outs"), r.get("bases"))
         lines.append(
             f"{r['scene_id']:3d}  {r['scene_type']:14s} {r['labels'] or '-':10s} "
-            f"{r['inning'] or '?':7s} {before}→{r['score'].split()[1] if r['score'] else '?'}"
+            f"{r['inning'] or '?':7s} {sit:12s} {score:18s}"
             f"  {r['e'] - r['s']:.0f}s")
     return "\n".join(lines)
 

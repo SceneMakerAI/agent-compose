@@ -207,9 +207,12 @@ def test_prompts_byte_equal_bench4(bench4):
     diff = [(a, b) for a, b in zip(theirs, ours) if a != b]
     assert len(ours) == len(theirs) and len(diff) == 1          # 정확히 한 줄만
     assert diff[0][0].startswith("사유:") and "장면 <번호>" in diff[0][1]   # 그 줄 = A2 수정
-    # user 프롬프트 렌더도 동일 입력에서 byte 등가
-    assert prompts.plan_user("q", "g", "inv", 180, "fb", "ev") == \
-        b4p.plan_user("q", "g", "inv", 180, "fb", "ev")
+    # user 프롬프트 렌더 — 인벤토리 헤더의 '상황' 열만 다르고 나머지는 byte 등가
+    u_ours = prompts.plan_user("q", "g", "inv", 180, "fb", "ev").splitlines()
+    u_theirs = b4p.plan_user("q", "g", "inv", 180, "fb", "ev").splitlines()
+    u_diff = [(a, b) for a, b in zip(u_theirs, u_ours) if a != b]
+    assert len(u_ours) == len(u_theirs)
+    assert [b for _, b in u_diff] == ["번호  태그  라벨  이닝  상황(아웃·주자)  점수(전→후)  길이"]
     rows = [(7, 100, [(95.0, 104.2, "발화")])]
     assert prompts.endfix_user(rows) == b4p.endfix_user(rows)
     assert prompts.verify_user("스펙", "패킷") == b4p.verify_user("스펙", "패킷")

@@ -32,18 +32,27 @@ class SourceRepo:
         Returns:
             list[dict]: {scene_id, h_id, s, e, tags(list), label_list(list),
                 scene_type, inning, score, score_before, score_delta, pitch_sec,
-                obs_sec}.
+                obs_sec, outs, bases, away_team, home_team}.
         Description:
             - obs_sec = t_play_baseball.end_sec(전광판 관측 시각) — 전이 원장이 보증하는 플레이
               결과 시점. cut 의 관측 하한(컷은 이 시점 이전에 끝날 수 없다) 재료.
+            - outs·bases·팀명은 t_transition_baseball(전광판 상태) — 인벤토리에 "상황"을 주는
+              유일한 재료다. 태그·라벨로는 2사 만루 위기 탈출과 무사 주자없음 평범한 아웃이
+              똑같이 보인다(둘 다 범타·score_delta=0). 볼카운트는 넣지 않는다: 관측이 플레이
+              종료 후라 실측 330건 중 314건이 0-0 이라 변별력이 없다.
+            - 병합 장면은 h_id 가 앞쪽 것을 유지해 board_sec 이 실제 결과보다 이를 수 있다
+              (audit 6-1) — 상황이 병합 전 값일 여지가 있다.
         """
         sql = (
             "SELECT sc.scene_id, sc.h_id, sc.scene_type, sc.inning, sc.score, "
             "       sc.score_before, sc.score_delta, sc.labels, sc.pitch_sec, "
             "       sc.start_ms / 1000 AS s, sc.end_ms / 1000 AS e, "
-            "       p.end_sec AS obs_sec "
+            "       p.end_sec AS obs_sec, "
+            "       tr.outs, tr.bases, tr.away_team, tr.home_team "
             "FROM t_scene_baseball sc "
             "LEFT JOIN t_play_baseball p ON p.v_id = sc.v_id AND p.h_id = sc.h_id "
+            "LEFT JOIN t_transition_baseball tr "
+            "       ON tr.v_id = sc.v_id AND tr.sec = p.board_sec "
             "WHERE sc.v_id = %s AND sc.source = 'board' ORDER BY sc.scene_id"
         )
         async with self._db.acquire() as conn, conn.cursor(cursor=DictCursor) as cur:

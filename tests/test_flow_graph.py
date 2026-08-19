@@ -104,3 +104,39 @@ async def test_budget_omitted_falls_back_to_default():
     g = build_graph(llm, StubEmb(), StubStore())
     await run_compose(g, INV, "안타 모음", None)
     assert str(plan_mod.DEFAULT_BUDGET_SEC) in llm.calls[0][0]
+
+
+# ── 인벤토리 상황 렌더 ─────────────────────────────────
+
+def test_render_situation():
+    """전광판 아웃·주자 → 사람이 읽는 상황 문구. 값 부재는 '?'."""
+    from flow.plan import render_situation
+
+    assert render_situation(2, "111") == "2사 만루"
+    assert render_situation(1, "110") == "1사 1루·2루"
+    assert render_situation(0, "000") == "0사 주자없음"
+    assert render_situation(2, "001") == "2사 3루"
+    assert render_situation(None, "100") == "?"      # 전이 조인 실패
+    assert render_situation(1, None) == "?"
+
+
+def test_render_inventory_carries_situation_and_team():
+    """상황·팀명이 실제로 한 줄에 실린다 — 둘 다 라벨로는 표현되지 않는 정보."""
+    from flow.plan import render_inventory
+
+    rows = [{"scene_id": 65, "scene_type": "범타", "labels": "", "inning": "8회 말",
+             "score": "삼성 9-7 롯데", "score_before": "9-7", "s": 100.0, "e": 114.0,
+             "outs": 0, "bases": "100", "away_team": "삼성", "home_team": "롯데"}]
+    line = render_inventory(rows)
+    assert "0사 1루" in line
+    assert "삼성 9-7→9-7" in line
+
+
+def test_render_inventory_survives_missing_transition():
+    """전이 조인이 비어도(병합·판독 공백) 렌더가 죽지 않는다."""
+    from flow.plan import render_inventory
+
+    rows = [{"scene_id": 1, "scene_type": "범타", "labels": "", "inning": "1회 초",
+             "score": "", "score_before": None, "s": 0.0, "e": 10.0,
+             "outs": None, "bases": None, "away_team": None, "home_team": None}]
+    assert "?" in render_inventory(rows)
