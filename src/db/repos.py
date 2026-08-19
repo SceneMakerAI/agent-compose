@@ -66,26 +66,25 @@ class SourceRepo:
             r["label_list"] = r["labels"].split(",") if r["labels"] else []
         return rows
 
-    async def fetch_pitch_windows(self, v_id: int) -> dict[int, list[tuple[int, int]]]:
+    async def fetch_pitch_windows(self, v_id: int) -> list[tuple[int, int]]:
         """
         Summary:
-            장면별 투구 후보 구간 — bounds 의 시작 후보 재료.
-        Returns:
-            dict: {scene_id: [(시작초, 끝초), …]}.
+            보드 검출 투구 구간 **전량** — bounds 의 시작 후보 재료 (시간순).
         Description:
-            - t_transition_baseball.pitches 는 보드 검출이 찾은 투구 구간 목록이라
-              **샷 분류(shot_type)와 독립적인 재료**다. 장면 시작 이전은 분류가 비어 있는
-              경우가 많아(하이라이트 구간만 분류) 이쪽이 유일한 단서일 때가 있다.
-              v201 실측: 전이 293건 중 246건(84%)에 값이 있다.
+            장면 기준으로 조인하면 안 된다. 예전에는 장면의 board_sec 행 하나만 붙여
+            그 장면 소유 투구만 실었는데, bounds 가 찾는 건 **클립 경계 부근의 투구**라
+            앞선 전이의 투구가 통째로 빠졌다 — v202 장면11(cs=2558)은 창(2518~2558)
+            안에 2532·2550 이 있었는데 소유 행(2627)의 2583 만 실려 후보가 0건이었다.
+
+            보드 검출은 shot_type 과 **독립**이라 상류 분류가 비어도 살아 있는 유일한
+            단서다. 장면 이전 구간은 분류가 NULL 인 경우가 많다(v202 장면11 앞 40초:
+            12샷 전부 NULL) — 그래서 이 재료가 중요하다.
+        Returns:
+            list[tuple[int, int]]: [(투구 시작, 끝)…] 시간순, 중복 제거.
         """
-        sql = (
-            "SELECT sc.scene_id, tr.pitches "
-            "FROM t_scene_baseball sc "
-            "JOIN t_play_baseball p ON p.v_id = sc.v_id AND p.h_id = sc.h_id "
-            "JOIN t_transition_baseball tr ON tr.v_id = sc.v_id AND tr.sec = p.board_sec "
-            "WHERE sc.v_id = %s AND sc.source = 'board' AND tr.pitches IS NOT NULL"
-        )
-        out: dict[int, list[tuple[int, int]]] = {}
+        sql = ("SELECT pitches FROM t_transition_baseball "
+               "WHERE v_id = %s AND pitches IS NOT NULL ORDER BY sec")
+        out: set[tuple[int, int]] = set()
         async with self._db.acquire() as conn, conn.cursor(cursor=DictCursor) as cur:
             await cur.execute(sql, (v_id,))
             for r in await cur.fetchall():
@@ -93,10 +92,9 @@ class SourceRepo:
                     wins = json.loads(r["pitches"])
                 except (TypeError, ValueError):
                     continue                      # 형식이 깨진 행은 조용히 건너뛴다
-                out[r["scene_id"]] = [
-                    (int(w[0]), int(w[1])) for w in wins if isinstance(w, list) and len(w) == 2
-                ]
-        return out
+                out.update((int(w[0]), int(w[1]))
+                           for w in wins if isinstance(w, list) and len(w) == 2)
+        return sorted(out)
 
     async def fetch_transitions(self, v_id: int) -> list[dict]:
         """

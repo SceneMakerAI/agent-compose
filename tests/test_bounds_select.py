@@ -40,10 +40,37 @@ def test_start_candidates_prefer_pitch_over_batted():
     assert not any("타구" in why for _sec, why in got)
 
 
-def test_start_candidates_never_move_forward():
-    """시작은 앞으로만 되돌린다 — 뒤로 미루면 플레이를 잘라 먹는다."""
-    got = bounds.start_candidates(clip(cs=107.0), SEGS, [(200, 201)])
-    assert all(sec < 107.0 for sec, _ in got)
+def test_start_candidates_can_move_forward():
+    """시작을 뒤로도 옮길 수 있다 — 장면 경계가 앞 타석 꼬리를 물 때가 있다.
+
+    실측(v202 장면11 역전 홈런): 장면은 2558s 에 시작하는데 그 홈런의 투구는 2583s.
+    앞 25초는 심우준 타석의 견제 장면이라 무슨 일인지 알 수 없는 시작이었다.
+    앞쪽만 보던 탓에 정답이 구조적으로 후보에 못 들어왔다.
+    """
+    c = clip(cs=100.0, ce=160.0)
+    got = bounds.start_candidates(c, [{"s": 120.0, "e": 126.0, "shot_type": "투구",
+                                       "summary": "투수가 공을 던진다"}], [])
+    assert 120 in [int(sec) for sec, _ in got]
+
+
+def test_start_candidates_keep_clip_long_enough():
+    """뒤로 미뤄도 클립이 MIN_CLIP_SEC 밑으로 짧아지면 후보가 아니다."""
+    c = clip(cs=100.0, ce=120.0)                  # 20s — 116s 로 미루면 4s 만 남는다
+    got = bounds.start_candidates(c, [{"s": 116.0, "e": 118.0, "shot_type": "투구",
+                                       "summary": ""}], [])
+    assert 116 not in [int(sec) for sec, _ in got]
+
+
+def test_start_candidates_use_all_board_pitches():
+    """보드 검출 투구는 장면 소유분이 아니라 창 안 전량을 본다.
+
+    실측(v202 장면11): 창(2518~2558) 안에 2532·2550 이 있었는데 장면 소유 행의
+    2583 만 실려 후보가 0건이었다. 장면 기준 조인이 원인이었다.
+    """
+    c = clip(cs=2558.0, ce=2633.0)
+    got = bounds.start_candidates(c, [], [(2532, 2533), (2550, 2552), (2583, 2584)])
+    secs = {int(s) for s, _ in got}
+    assert {2532, 2550, 2583} <= secs
 
 
 def test_end_candidates_mark_coincidence():

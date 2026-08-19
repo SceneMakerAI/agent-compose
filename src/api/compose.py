@@ -129,7 +129,7 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
         v_id=req.v_id, scenes=tuple(scenes), segs=tuple(segs), utts=utts,
         game_line=f"v_id={req.v_id}  {parts[0]}(원정) vs {parts[2]}(홈)",
         inventory_text=plan_mod.render_inventory(scenes),
-        pitches=await repo.fetch_pitch_windows(req.v_id),   # bounds 시작 후보 재료
+        pitches=tuple(await repo.fetch_pitch_windows(req.v_id)),  # bounds 시작 후보 재료
         trans=tuple(await repo.fetch_transitions(req.v_id)),  # verify 사실 근거
     )
     tr = Trace(st.settings.trace_dir, req.v_id, req.query)

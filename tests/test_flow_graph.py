@@ -134,7 +134,7 @@ async def test_bounds_and_verify_fan_out_per_clip():
     inv = Inventory(v_id=999, scenes=SCENES, segs=SEGS,
                     utts=((118.0, 124.0, "넘어갑니다"), (212.0, 218.0, "잡아냅니다")),
                     game_line="g", inventory_text="(목록)",
-                    pitches={1: [(96, 97)], 2: [(196, 197)]})
+                    pitches=((96, 97), (196, 197)))
     llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), StubStore())
     await run_compose(g, inv, "안타 모음", 300)

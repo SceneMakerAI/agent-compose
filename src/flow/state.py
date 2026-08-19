@@ -11,7 +11,7 @@ bench4 는 인벤토리(scenes·segs·utts)를 노드 클로저로 들고 cutran
   향후 checkpointer 도입 여지). 자원은 graph 빌드 시 주입.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TypedDict
 
 
@@ -25,7 +25,7 @@ class Inventory:
     utts: tuple[tuple[float, float, str], ...]  # STT (s, e, text) 시간순
     game_line: str                            # "v_id=201  삼성(원정) vs 롯데(홈)"
     inventory_text: str                       # plan 이 보는 목록 렌더 (요청당 1회)
-    pitches: dict = field(default_factory=dict)   # {scene_id: [(투구 시작, 끝)…]} — bounds 재료
+    pitches: tuple = ()                       # 보드 검출 투구 [(시작, 끝)…] 전량 — bounds 재료
     trans: tuple[dict, ...] = ()              # 전광판 전이 시간순 — verify 가 구간별로 골라 쓴다
 
 

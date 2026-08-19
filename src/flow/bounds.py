@@ -26,6 +26,13 @@ log = get_logger(__name__)
 
 # 시작을 되돌릴 수 있는 최대 폭 — 이보다 멀면 직전 타석을 물고 온다.
 START_MAX_BACK_SEC = 40
+# 시작을 **뒤로 미룰 수 있는** 최대 폭. 장면 경계가 전이 기준이라 앞 타석 꼬리를 무는
+# 경우가 있다 — v202 장면11(역전 홈런)은 장면이 2558s 에 시작하는데 그 홈런을 만든
+# 투구는 2583s 다. 앞 25초는 심우준 타석의 견제 장면이라 "무슨 일인지 알 수 없는"
+# 시작이었다. 앞쪽만 보던 탓에 정답이 구조적으로 후보에 못 들어왔다.
+START_MAX_FWD_SEC = 30
+# 시작을 미뤄도 클립이 이보다 짧아지면 안 된다 — 플레이를 잘라 먹는다.
+MIN_CLIP_SEC = 8
 # 끝을 늘릴 수 있는 최대 폭 (구 ENDFIX_MAX_EXT_SEC 계승).
 END_MAX_EXT_SEC = 12
 # 후보 개수 상한 — 많으면 모델이 고르지 못하고 프롬프트만 커진다.
@@ -86,24 +93,34 @@ def _ctx(sec: float, segs: list[dict], utts: list, at_end: bool = False) -> dict
 
 
 def start_candidates(clip: dict, segs: list[dict], pitches: list[tuple[int, int]]) -> list:
-    """시작 후보 [(초, 설명)] — 앞쪽으로만 되돌린다(뒤로 미루면 플레이를 잘라 먹는다)."""
-    cs = clip["cut"]["cs"]
-    lo = cs - START_MAX_BACK_SEC
+    """시작 후보 [(초, 설명)] — 앞뒤 양쪽. 클립이 너무 짧아지는 뒤쪽 값은 뺀다.
+
+    뒤로도 보는 이유는 장면 경계가 전이 기준이라 앞 타석 꼬리를 물기 때문이다
+    (v202 장면11: 장면 2558s, 그 홈런의 투구는 2583s). 후보에 화면·해설이 붙으므로
+    모델이 "이건 앞 타석 견제다"를 읽고 가릴 수 있다.
+    """
+    cs, ce = clip["cut"]["cs"], clip["cut"]["ce"]
+    lo, hi = cs - START_MAX_BACK_SEC, min(cs + START_MAX_FWD_SEC, ce - MIN_CLIP_SEC)
+
+    def near(sec: float) -> bool:
+        return lo <= sec <= hi and abs(sec - cs) >= 1      # 현재 시작 자신은 후보가 아니다
+
     out: list[tuple[float, str]] = []
     for ps, _pe in pitches:                       # ① 보드 검출 투구 (분류 없이도 있다)
-        if lo <= ps < cs:
+        if near(ps):
             out.append((float(ps), "보드 검출 투구"))
     for s in segs:                                 # ② 분류된 투구 샷 시작
-        if lo <= s["s"] < cs and s.get("shot_type") == "투구":
+        if near(s["s"]) and s.get("shot_type") == "투구":
             out.append((s["s"], "'투구' 샷 시작"))
     if not out:                                    # ③ 투구를 못 찾으면 타구·수비 시작
         for s in segs:
-            if lo <= s["s"] < cs and s.get("shot_type") == "타구·수비":
+            if near(s["s"]) and s.get("shot_type") == "타구·수비":
                 out.append((s["s"], "'타구·수비' 샷 시작"))
     uniq: dict[int, tuple[float, str]] = {}
     for sec, why in out:
         uniq.setdefault(int(sec), (sec, why))
-    return sorted(uniq.values(), key=lambda x: -x[0])[:CAND_MAX]
+    # 현재 시작에 가까운 것부터 — 멀수록 앞/뒤 타석을 물 위험이 크다.
+    return sorted(uniq.values(), key=lambda x: abs(x[0] - cs))[:CAND_MAX]
 
 
 def end_candidates(clip: dict, segs: list[dict], utts: list) -> list:
@@ -139,7 +156,7 @@ def end_candidates(clip: dict, segs: list[dict], utts: list) -> list:
 
 
 def build_rows(clips: list[dict], segs: list[dict], utts: list,
-               pitches_of: dict[int, list]) -> list[dict]:
+               pitches: list[tuple[int, int]]) -> list[dict]:
     """LLM 에 낼 행 — 후보가 하나도 없는 클립은 물어볼 게 없으므로 뺀다.
 
     후보마다 그 시각의 화면·해설을 붙이고, **현재 시작이 무엇인지도** 함께 싣는다.
@@ -152,7 +169,7 @@ def build_rows(clips: list[dict], segs: list[dict], utts: list,
         cs, ce = c["cut"]["cs"], c["cut"]["ce"]
         starts = [{"sec": sec, "why": why, "gap": round(cs - sec),
                    **_ctx(sec, segs, utts)}
-                  for sec, why in start_candidates(c, segs, pitches_of.get(c["scene_id"], []))]
+                  for sec, why in start_candidates(c, segs, pitches)]
         ends = [{"sec": sec, "why": why, **_ctx(sec, segs, utts, at_end=True)}
                 for sec, why in end_candidates(c, segs, utts)]
         if starts or ends:

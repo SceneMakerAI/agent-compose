@@ -168,7 +168,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         clips = [dict(r, cut=dict(r["cut"])) for r in st["clips"]]     # 복사 후 수정
         if not use_bounds:
             return {"clips": clips}
-        rows = bounds_mod.build_rows(clips, list(inv.segs), inv.utts, inv.pitches)
+        rows = bounds_mod.build_rows(clips, list(inv.segs), inv.utts, list(inv.pitches))
         if not rows:
             return {"clips": clips}
 
