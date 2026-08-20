@@ -24,20 +24,34 @@ def clip(scene_id=1, cs=115.0, ce=120.0, tags="홈런", labels="", delta=1, inni
 def test_start_candidates_use_board_pitch_when_shot_missing():
     """샷 분류가 없어도 보드 검출 투구가 시작 후보가 된다.
 
-    장면 이전은 shot_type 이 NULL 인 경우가 많아(하이라이트 구간만 분류) 보드 검출이
-    유일한 단서일 때가 있다 — 역전 홈런이 '주자가 뛰는 장면'부터 시작하던 원인.
+    장면과 겹치는 샷만 분류돼 shot_type 이 NULL 인 구간이 많다 — 보드 검출이 유일한
+    단서일 때가 있다. 역전 홈런이 '주자가 뛰는 장면'부터 시작하던 원인.
     """
-    c = clip(cs=115.0)
-    got = bounds.start_candidates(c, [{"s": 100.0, "e": 115.0, "shot_type": None}],
-                                  [(104, 106)])
-    assert (104.0, "보드 검출 투구") in got
+    c = clip(cs=100.0, ce=160.0)
+    got = bounds.start_candidates(c, [{"s": 100.0, "e": 130.0, "shot_type": None}],
+                                  [(126, 128)])
+    assert (126.0, "보드 검출 투구") in got
 
 
 def test_start_candidates_prefer_pitch_over_batted():
     """투구 후보가 있으면 타구·수비는 넣지 않는다 (원칙은 투구부터)."""
-    got = bounds.start_candidates(clip(cs=115.0), SEGS, [])
+    got = bounds.start_candidates(clip(cs=100.0, ce=160.0), SEGS, [])
     assert any("투구" in why for _sec, why in got)
     assert not any("타구" in why for _sec, why in got)
+
+
+def test_start_candidates_never_go_backward():
+    """현재 시작보다 이른 후보는 내지 않는다 — 전부 앞 플레이의 투구다.
+
+    5경기 전수 실측(2026-08-20): 게이트 통과 클립의 뒤쪽 시작 후보 29건 중 그 플레이
+    자신의 투구는 0건. cs 는 장면 시작이고 장면 시작은 vision3 가 투구 샷 머리
+    (refined) 또는 앞 전이 관측(unresolved)으로 잡아 늘 투구보다 이르거나 같다.
+    """
+    c = clip(cs=2558.0, ce=2633.0)                 # v202 장면11 (역전 홈런)
+    got = bounds.start_candidates(c, [], [(2532, 2533), (2550, 2552), (2583, 2584)])
+    secs = {int(s) for s, _ in got}
+    assert 2583 in secs                            # 그 홈런의 투구 — 앞으로 미루는 정답
+    assert not (secs & {2532, 2550})               # 앞 타석 견제 — 후보가 아니다
 
 
 def test_start_candidates_can_move_forward():
@@ -61,18 +75,6 @@ def test_start_candidates_keep_clip_long_enough():
     assert 116 not in [int(sec) for sec, _ in got]
 
 
-def test_start_candidates_use_all_board_pitches():
-    """보드 검출 투구는 장면 소유분이 아니라 창 안 전량을 본다.
-
-    실측(v202 장면11): 창(2518~2558) 안에 2532·2550 이 있었는데 장면 소유 행의
-    2583 만 실려 후보가 0건이었다. 장면 기준 조인이 원인이었다.
-    """
-    c = clip(cs=2558.0, ce=2633.0)
-    got = bounds.start_candidates(c, [], [(2532, 2533), (2550, 2552), (2583, 2584)])
-    secs = {int(s) for s, _ in got}
-    assert {2532, 2550, 2583} <= secs
-
-
 def test_end_candidates_mark_coincidence():
     """발화 끝과 화면 전환이 겹치면 표시한다 — 가장 깔끔한 끝점을 모델이 알게."""
     got = bounds.end_candidates(clip(ce=120.0), SEGS, UTTS)
@@ -88,11 +90,40 @@ def test_apply_rejects_values_outside_candidates():
 
 
 def test_apply_moves_when_candidate_matches():
-    c = clip(cs=115.0, ce=120.0)
+    c = clip(cs=100.0, ce=160.0)
     rows = bounds.build_rows([c], SEGS, UTTS, {})
     start = int(rows[0]["starts"][0]["sec"])
     moved = bounds.apply([c], rows, f"장면 1: 시작 {start} 끝 유지")
     assert c["cut"]["cs"] == float(start) and moved
+
+
+def test_build_rows_skips_clips_with_pitch_anchor():
+    """cut 이 투구 앵커를 잡은 클립은 아예 묻지 않는다.
+
+    앵커가 있으면 cut 의 시작이 이미 그 플레이의 투구다. LLM 에 물으면 되돌리기만
+    했다 — v201 comp20 장면42 는 앵커 7510.3s 를 7473.0s('타구·수비' = 앞 타석)로
+    37초 물렀다.
+    """
+    anchored = clip(scene_id=1, cs=115.0, ce=120.0)
+    anchored["cut"]["anchor"] = (106.0, 112.0)
+    free = clip(scene_id=2, cs=115.0, ce=120.0)          # anchor 키 없음 = 앵커 없음
+    rows = bounds.build_rows([anchored, free], SEGS, UTTS, [(104, 106)])
+    assert [r["scene_id"] for r in rows] == [2]
+
+
+def test_apply_keeps_candidate_fraction():
+    """수용한 후보는 **원래 소수 초**로 들어간다 — 정수로 내리면 샷이 바뀐다.
+
+    v201 은 t_segment 경계가 소수라 4369.3s('투구' 시작)와 4369s(직전 '리액션'
+    끝자락)가 서로 다른 샷이다. 프롬프트는 정수로 보여주되 적용은 실측값으로 한다.
+    """
+    segs = [{"s": 100.0, "e": 108.3, "shot_type": "리액션", "summary": "타석"},
+            {"s": 108.3, "e": 120.0, "shot_type": "투구", "summary": "투수가 던진다"}]
+    c = clip(cs=100.0, ce=140.0)
+    rows = bounds.build_rows([c], segs, UTTS, [])
+    assert rows[0]["starts"][0]["sec"] == 108.3       # 후보는 소수를 그대로 들고 있다
+    bounds.apply([c], rows, "장면 1: 시작 108 끝 유지")
+    assert c["cut"]["cs"] == 108.3
 
 
 # ── select ────────────────────────────────────────────
@@ -247,7 +278,8 @@ def test_bounds_user_attaches_narrative_per_candidate():
     """후보 밑에 그 시각의 화면·해설이 붙는다 — 따로 주면 모델이 조인해야 한다."""
     from flow.prompts import bounds_user
 
-    rows = bounds.build_rows([clip(cs=115.0, ce=120.0)], SEGS, UTTS, {})
+    utts = [(104.0, 112.0, "던집니다"), *UTTS]     # 후보 시각에 걸리는 발화
+    rows = bounds.build_rows([clip(cs=100.0, ce=160.0)], SEGS, utts, {})
     text = bounds_user(rows)
     assert "화면 [투구] 투수가 공을 던진다" in text
     assert "해설" in text
@@ -270,11 +302,11 @@ def test_apply_accepts_unit_suffix():
 
 # ── 중복 후보 병합 ─────────────────────────────────────
 
-# 90~130 은 한 투구 샷 + 한 발화 → 그 안의 후보들은 서로 구별되지 않는다.
-# 130~170 은 다른 샷 + 다른 발화 → 현재 시작을 여기 두면 후보와 구별된다.
-_SEGS2 = [{"s": 90.0, "e": 130.0, "shot_type": "투구", "summary": "투수가 공을 던진다"},
-          {"s": 130.0, "e": 170.0, "shot_type": "리액션", "summary": "타자가 걸어간다"}]
-_UTTS2 = [(90.0, 130.0, "같은 문장이 계속된다"), (130.0, 170.0, "다른 문장이다")]
+# 90~130 은 현재 시작이 놓일 자리(다른 샷·다른 발화), 130~200 은 한 투구 샷 + 한 발화
+# → 그 안의 후보들은 서로 구별되지 않는다. 후보는 전부 현재 시작보다 뒤에 둔다.
+_SEGS2 = [{"s": 90.0, "e": 130.0, "shot_type": "리액션", "summary": "타자가 걸어간다"},
+          {"s": 130.0, "e": 200.0, "shot_type": "투구", "summary": "투수가 공을 던진다"}]
+_UTTS2 = [(90.0, 130.0, "다른 문장이다"), (130.0, 200.0, "같은 문장이 계속된다")]
 
 
 def test_indistinguishable_start_candidates_are_merged():
@@ -284,15 +316,15 @@ def test_indistinguishable_start_candidates_are_merged():
     화면은 아예 없었다. thinking 94,575자를 쓰고 본문 없이 재시도로 떨어졌다.
     반면 후보 5개가 전부 다른 해설을 단 장면11 은 4,343자로 즉결이었다.
     """
-    c = clip(cs=135.0, ce=175.0)
-    rows = bounds.build_rows([c], _SEGS2, _UTTS2, [(100, 101), (110, 111), (120, 121)])
+    c = clip(cs=125.0, ce=220.0)
+    rows = bounds.build_rows([c], _SEGS2, _UTTS2, [(135, 136), (145, 146), (155, 156)])
     assert len(rows[0]["starts"]) == 1, rows[0]["starts"]
 
 
 def test_start_candidate_same_as_current_is_dropped():
     """현재와 화면·해설이 같은 후보는 대안이 아니다 — 그 답은 이미 '유지'다."""
-    c = clip(cs=110.0, ce=160.0)          # 110 은 90~130 투구 샷 안
-    rows = bounds.build_rows([c], _SEGS2, _UTTS2, [(115, 116)])   # 같은 샷·같은 발화
+    c = clip(cs=140.0, ce=190.0)          # 140 은 130~200 투구 샷 안
+    rows = bounds.build_rows([c], _SEGS2, _UTTS2, [(150, 151)])   # 같은 샷·같은 발화
     assert rows and rows[0]["starts"] == [], rows[0]["starts"]
 
 

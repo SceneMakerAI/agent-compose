@@ -130,11 +130,17 @@ async def test_bounds_and_verify_fan_out_per_clip():
     묶어 보내던 시절 v201 은 bounds 10분 26초 · verify 9분 8초를 쓰면서 서버는 내내
     Running 1 · KV 3% 였다 (실측 2026-08-20). 콜 수는 눈으로 안 보이니 여기서 고정한다.
     """
-    # bounds 는 후보가 있는 클립만 묻는다 — 보드 투구와 꼬리 발화를 깔아 둘 다 물게 한다
-    inv = Inventory(v_id=999, scenes=SCENES, segs=SEGS,
-                    utts=((118.0, 124.0, "넘어갑니다"), (212.0, 218.0, "잡아냅니다")),
+    # bounds 는 **투구 앵커가 없고** 현재 시작과 구별되는 후보가 있는 클립만 묻는다.
+    # 앵커가 잡히면 cut 의 시작이 정답이라 아예 묻지 않으므로 픽스처에서 pitch_sec 과
+    # '투구' 샷을 뺀다 (앵커 있는 경우는 test_build_rows_skips_clips_with_pitch_anchor).
+    # 후보는 cs **이후**여야 하고, 화면·해설이 현재와 달라야 살아남는다(_dedup).
+    scenes = (scene(1, 100, 130), scene(2, 200, 240, tags="범타"))
+    segs = tuple(dict(s, shot_type="타구·수비", summary=f"샷{s['seg_id']}") for s in SEGS)
+    inv = Inventory(v_id=999, scenes=scenes, segs=segs,
+                    utts=((108.0, 112.0, "던집니다"), (118.0, 124.0, "넘어갑니다"),
+                          (208.0, 212.0, "던집니다"), (212.0, 218.0, "잡아냅니다")),
                     game_line="g", inventory_text="(목록)",
-                    pitches=((96, 97), (196, 197)))
+                    pitches=((110, 111), (210, 211)))
     llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), StubStore())
     await run_compose(g, inv, "안타 모음", 300)

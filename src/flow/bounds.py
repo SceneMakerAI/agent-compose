@@ -6,15 +6,29 @@
 후보는 여기서 **결정적으로** 만들고 LLM 은 고르기만 한다 — 검증기(apply)가 제시 목록
 밖의 값을 기각하므로 모델이 시각을 지어낼 수 없다.
 
-시작 후보를 여러 층에서 뽑는 근거(실측 2026-08-19):
-- 편성 클립 121건 중 114건(94%)은 이미 투구 근처에서 시작한다. 문제는 나머지 7건이
-  하필 역전 홈런 2건을 포함한다는 것 — 홈런은 FULL_CLIP_TAGS 라 앵커 로직을 통째로
-  건너뛰고, 그 장면들은 pitch_sec 도 NULL 이다.
-- v202 장면 11(역전 홈런)은 장면이 2558s 에 시작하는데 투구는 2583s 다. 25초 앞의
-  '주자가 1루에 슬라이딩' 샷부터 시작해 무슨 일인지 알 수 없었다.
-- shot_type 은 하이라이트 구간과 겹치는 샷만 채워져 장면 이전은 NULL 이 많다.
-  그래서 보드 검출(t_transition.pitches)을 독립 재료로 함께 쓴다 — v201 전이 293건 중
-  246건(84%)에 값이 있다.
+**대상은 투구 앵커가 없는 클립뿐이다** (2026-08-20 축소). 앵커가 잡힌 클립에서
+cut 의 시작은 이미 그 플레이의 투구 샷이고, LLM 이 손대면 앞 타석으로 되돌아갔다
+— v201 comp20 실측: 15클립 중 12건이 cut 단계에서 '투구' 시작이었는데 bounds 가
+장면9 를 -33.0s, 장면42 를 -37.3s 옮겨 각각 미분류·'타구·수비' 시작이 됐다.
+(그 이전 판들이 "투구 시작 0%"로 보였던 건 별개 원인 — t_compose_clip.start_time 이
+초 정밀도라 4369.3s→4369.0s 로 내려가며 직전 샷에 걸친 착시였다. 컬럼을 time(3)
+으로 넓혀 해소.)
+
+**시작 후보는 앞으로만 낸다** (2026-08-20 축소 — 구 START_MAX_BACK_SEC 폐지).
+5경기 전수 실측: 게이트를 통과한 클립의 뒤쪽 시작 후보 29건 중 **그 플레이 자신의
+투구는 0건**이었다. 전부 클립 시작보다 이른, 앞 플레이의 투구였다. 우연이 아니라
+구조가 그렇다 —
+
+- 여기까지 오는 클립은 앵커가 없어 cut 이 `_full` 로 처리한 것이라 cs = 장면 시작이다.
+- 장면 시작은 vision3 가 **투구 샷 머리**(refined) 또는 전이 원장 start_sec
+  (unresolved)로 잡는다. 앞은 정의상 투구 샷의 시작이고, 뒤는 앞 전이의 관측이라
+  더 이르다 — 어느 쪽이든 그 플레이의 투구보다 **이르거나 같다**.
+- 그러니 고칠 여지는 언제나 cs 이후에 있다. v202 장면11(역전 홈런)이 전형이다:
+  장면 2558s, 그 홈런의 투구 2583s, 앞 25초는 앞 타자의 견제 장면.
+
+shot_type 은 하이라이트 구간과 겹치는 샷만 채워져 장면 이전은 NULL 이 많다.
+그래서 보드 검출(t_transition.pitches)을 독립 재료로 함께 쓴다 — v201 전이 293건 중
+246건(84%)에 값이 있다.
 """
 
 import math
@@ -24,12 +38,10 @@ from log import get_logger
 
 log = get_logger(__name__)
 
-# 시작을 되돌릴 수 있는 최대 폭 — 이보다 멀면 직전 타석을 물고 온다.
-START_MAX_BACK_SEC = 40
-# 시작을 **뒤로 미룰 수 있는** 최대 폭. 장면 경계가 전이 기준이라 앞 타석 꼬리를 무는
-# 경우가 있다 — v202 장면11(역전 홈런)은 장면이 2558s 에 시작하는데 그 홈런을 만든
-# 투구는 2583s 다. 앞 25초는 심우준 타석의 견제 장면이라 "무슨 일인지 알 수 없는"
-# 시작이었다. 앞쪽만 보던 탓에 정답이 구조적으로 후보에 못 들어왔다.
+# 시작을 **뒤로 미룰 수 있는** 최대 폭 — 유일한 시작 이동 방향이다 (모듈 docstring).
+# 장면 경계가 전이 기준이라 앞 타석 꼬리를 무는 경우가 있다: v202 장면11(역전 홈런)은
+# 장면이 2558s 에 시작하는데 그 홈런을 만든 투구는 2583s 다. 앞 25초는 심우준 타석의
+# 견제 장면이라 "무슨 일인지 알 수 없는" 시작이었다.
 START_MAX_FWD_SEC = 30
 # 시작을 미뤄도 클립이 이보다 짧아지면 안 된다 — 플레이를 잘라 먹는다.
 MIN_CLIP_SEC = 8
@@ -138,14 +150,14 @@ def _dedup(cands: list[dict], drop_sig: tuple | None = None,
 
 
 def start_candidates(clip: dict, segs: list[dict], pitches: list[tuple[int, int]]) -> list:
-    """시작 후보 [(초, 설명)] — 앞뒤 양쪽. 클립이 너무 짧아지는 뒤쪽 값은 뺀다.
+    """시작 후보 [(초, 설명)] — **현재 시작 이후만**. 클립이 너무 짧아지는 값은 뺀다.
 
-    뒤로도 보는 이유는 장면 경계가 전이 기준이라 앞 타석 꼬리를 물기 때문이다
-    (v202 장면11: 장면 2558s, 그 홈런의 투구는 2583s). 후보에 화면·해설이 붙으므로
-    모델이 "이건 앞 타석 견제다"를 읽고 가릴 수 있다.
+    되돌리는 방향은 내지 않는다: cs 는 장면 시작이고 장면 시작은 그 플레이의 투구보다
+    이르거나 같으므로, cs 이전 후보는 전부 앞 플레이의 투구다 (모듈 docstring — 5경기
+    29건 전수). 후보에 화면·해설이 붙으므로 모델이 "이건 앞 타석 견제다"를 읽고 가린다.
     """
     cs, ce = clip["cut"]["cs"], clip["cut"]["ce"]
-    lo, hi = cs - START_MAX_BACK_SEC, min(cs + START_MAX_FWD_SEC, ce - MIN_CLIP_SEC)
+    lo, hi = cs, min(cs + START_MAX_FWD_SEC, ce - MIN_CLIP_SEC)
 
     def near(sec: float) -> bool:
         # 현재 시작과 MERGE_GAP_SEC 이내면 같은 지점이라 대안이 아니다.
@@ -165,7 +177,7 @@ def start_candidates(clip: dict, segs: list[dict], pitches: list[tuple[int, int]
     uniq: dict[int, tuple[float, str]] = {}
     for sec, why in out:
         uniq.setdefault(int(sec), (sec, why))
-    # 현재 시작에 가까운 것부터 — 멀수록 앞/뒤 타석을 물 위험이 크다.
+    # 현재 시작에 가까운 것부터 — 멀수록 **다음** 타석의 투구일 위험이 크다.
     return sorted(uniq.values(), key=lambda x: abs(x[0] - cs))[:CAND_MAX]
 
 
@@ -205,6 +217,10 @@ def build_rows(clips: list[dict], segs: list[dict], utts: list,
                pitches: list[tuple[int, int]]) -> list[dict]:
     """LLM 에 낼 행 — 후보가 하나도 없는 클립은 물어볼 게 없으므로 뺀다.
 
+    **투구 앵커가 있는 클립은 아예 묻지 않는다** — cut 이 정한 시작이 이미 정답이고,
+    LLM 은 그걸 되돌리기만 했다(모듈 docstring 참조). 그 대가로 그런 클립은 끝도
+    cut 결과(대사 꼬리 스냅·관측 하한) 그대로 간다.
+
     후보마다 그 시각의 화면·해설을 붙이고, **현재 시작이 무엇인지도** 함께 싣는다.
     규칙에 "현재 시작이 이미 투구 직전이면 유지"가 있는데 후보는 cs 이전만 나열해서
     모델이 확인할 방법이 없었다 (v201 장면5: cs=1342 가 이미 '투구' 샷 시작인데
@@ -212,6 +228,13 @@ def build_rows(clips: list[dict], segs: list[dict], utts: list,
     """
     rows = []
     for c in clips:
+        if c["cut"].get("anchor") is not None:
+            # 투구 앵커가 잡힌 클립은 물어보지 않는다. cut 이 이미 그 플레이의 투구
+            # 샷에서 시작시켰고(실측 2026-08-20: v200 66/67 · v201 66/71 · v202 51/56
+            # 이 '투구' 시작), 그걸 LLM 이 되돌리는 쪽이 손해였다 — v201 comp20 의
+            # 장면9(-33s)·42(-37.3s)는 앵커를 무르고 앞 타석 꼬리로 돌아갔다.
+            # bounds 가 필요한 건 앵커를 못 찾은 클립(홈런·판독 통째, pitch_sec NULL)이다.
+            continue
         cs, ce = c["cut"]["cs"], c["cut"]["ce"]
         cur = _ctx(cs, segs, utts)
         at_start = _shot_at(cs, segs)
@@ -221,7 +244,7 @@ def build_rows(clips: list[dict], segs: list[dict], utts: list,
         # 현재의 발화가 아직 이어지는 후보가 이기는데(v200 장면21: 3636 이 3640 을 밀어냄)
         # 정작 그 플레이를 말하는 건 뒤쪽이다("김성윤의 적시타가 나옵니다").
         cur_utt = cur.get("utt") or ""
-        cands = [{"sec": sec, "why": why, "gap": round(cs - sec), **_ctx(sec, segs, utts)}
+        cands = [{"sec": sec, "why": why, "gap": round(sec - cs), **_ctx(sec, segs, utts)}
                  for sec, why in start_candidates(c, segs, pitches)]
         cands.sort(key=lambda x: ((x.get("utt") or "") == cur_utt, abs(x["sec"] - cs)))
         starts = sorted(_dedup(cands, drop_sig=_sig(cur), near=MERGE_GAP_SEC),
@@ -249,6 +272,17 @@ _LINE = re.compile(
     rf"장면\s*(\d+)\s*[:：]\s*시작\s*(유지|\d+){_UNIT}\s*끝\s*(유지|\d+){_UNIT}")
 
 
+def _match(cands: list[dict], sec: int) -> float | None:
+    """모델이 답한 정수 초 → 그 후보의 **실제 초(소수 포함)**. 없으면 None.
+
+    프롬프트는 후보를 정수로 보여주지만(모델에게 0.3초는 의미가 없다) 적용은 원래
+    값으로 해야 한다. 정수로 되돌리면 샷 경계 바로 뒤였던 시작이 직전 샷으로 넘어간다
+    — v201 은 t_segment 경계가 소수라 4369.3s('투구' 시작)가 4369s('리액션' 끝자락)가
+    됐다. 후보는 int(sec) 로 중복 제거돼 있어 정수 1개당 후보 1건이다.
+    """
+    return next((c["sec"] for c in cands if int(c["sec"]) == sec), None)
+
+
 def apply(clips: list[dict], rows: list[dict], text: str) -> list[str]:
     """제안 처분 — 제시한 후보의 초 값과 일치할 때만 적용. 그 외는 무시(임의 초 기각)."""
     shown = {r["scene_id"]: r for r in rows}
@@ -265,16 +299,16 @@ def apply(clips: list[dict], rows: list[dict], text: str) -> list[str]:
         note = []
         if m.group(2) != "유지":
             new = int(m.group(2))
-            if any(int(cand["sec"]) == new for cand in row["starts"]):
-                note.append(f"시작 {cut_['cs']:.0f}→{new}")
-                cut_["cs"] = float(new)
+            if (hit := _match(row["starts"], new)) is not None:
+                note.append(f"시작 {cut_['cs']:.1f}→{hit:.1f}")
+                cut_["cs"] = hit
             else:
                 log.info("bounds 기각: 장면%d 시작 %s (후보 밖)", sid, new)
         if m.group(3) != "유지":
             new = int(m.group(3))
-            if any(int(cand["sec"]) == new for cand in row["ends"]):
-                note.append(f"끝 {cut_['ce']:.0f}→{new}")
-                cut_["ce"] = float(new)
+            if (hit := _match(row["ends"], new)) is not None:
+                note.append(f"끝 {cut_['ce']:.1f}→{hit:.1f}")
+                cut_["ce"] = hit
             else:
                 log.info("bounds 기각: 장면%d 끝 %s (후보 밖)", sid, new)
         if note:

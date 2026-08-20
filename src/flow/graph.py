@@ -169,6 +169,8 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         if not use_bounds:
             return {"clips": clips}
         rows = bounds_mod.build_rows(clips, list(inv.segs), inv.utts, list(inv.pitches))
+        log.info("bounds 대상 %d/%d클립 — 나머지는 투구 앵커가 있어 cut 경계 그대로",
+                 len(rows), len(clips))
         if not rows:
             return {"clips": clips}
 

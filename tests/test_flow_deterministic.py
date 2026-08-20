@@ -91,10 +91,49 @@ def test_rank_equiv(bench4):
 
 
 def test_cut_equiv(bench4):
+    """FULL_CLIP_TAGS 장면은 등가 대상에서 뺀다 — 2026-08-20 정책 분리.
+
+    bench4 는 그 태그에서 시작·끝을 **둘 다** 포기해 통째로 냈다. 지금은 끝만 통째로
+    두고 시작은 앵커를 쓴다 (cut 모듈 docstring — v202 장면11 이 그 규칙으로 풀린다).
+    나머지 경로는 여전히 byte 등가여야 한다.
+    """
+    from flow import vocab
+
     for sc in SCENES:
+        if set(sc["tags"]) & vocab.FULL_CLIP_TAGS:
+            continue
         ours = cut.clip(dict(sc), SEGS, UTTS)
         theirs = bench4["cut"].clip(dict(sc), SEGS, UTTS)
         assert ours == theirs, f"scene {sc['scene_id']} 불일치: {ours} != {theirs}"
+
+
+def test_cut_full_tag_keeps_start_anchor():
+    """홈런은 **끝만** 통째다 — 시작은 앵커(투구 샷)를 쓴다.
+
+    구 동작은 태그 하나로 앵커를 버려 클립이 장면 시작(앞 타석 꼬리)부터 시작했고,
+    그 클립이 bounds 로 넘어가 LLM 이 시작을 다시 찾았다. 실측 v202 장면11:
+    장면 2558s · 첫 투구 샷 2583s.
+    """
+    sc = scene(9, 400, 440, tags="홈런", labels="", delta=1, pitch=None)
+    got = cut.clip(dict(sc), SEGS, UTTS)
+    assert got["anchor"] == (400.0, 405.0)            # 첫 '투구' 샷
+    assert got["cs"] == 400.0
+    assert got["ce"] == 440.0                          # 끝은 장면 그대로 (레시피로 안 좁힌다)
+    assert got["mode"].startswith("끝 통째")
+
+
+def test_cut_full_tag_without_pitch_shot_stays_whole():
+    """'투구' 샷이 아예 없으면 홈런도 예전처럼 통째 — 앵커를 지어내지 않는다.
+
+    5경기 실측에서 이 경로가 6건 남는다(진짜 미해결). 이것만 bounds 가 맡는다.
+    """
+    segs = [{"seg_id": 1, "s": 500.0, "e": 512.0, "shot_type": "주루"},
+            {"seg_id": 2, "s": 512.0, "e": 530.0, "shot_type": "리액션"}]
+    sc = scene(9, 500, 530, tags="홈런", labels="", delta=1, pitch=None)
+    got = cut.clip(dict(sc), segs, [])
+    assert got["anchor"] is None
+    assert (got["cs"], got["ce"]) == (500.0, 530.0)
+    assert got["mode"] == "통째(레시피 제외 태그)"
 
 
 def test_cut_immutability():

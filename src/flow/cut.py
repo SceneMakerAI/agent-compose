@@ -5,6 +5,18 @@
 ② 구간 안 첫 '투구' 샷 (pitch_sec 없는 시작 보정 건은 첫 샷이 투구)
 ③ 둘 다 없으면 클립 통째 (FULL 폴백 = 완화 L2 내장 — 함부로 좁히지 않는다)
 
+**시작과 끝의 정책을 분리한다** (2026-08-20). FULL_CLIP_TAGS(홈런·비디오 판독)는
+"레시피로 **끝**을 좁히지 마라"는 뜻이다 — 홈런의 베이스 도는 장면·더그아웃 리액션은
+레시피 유형에 없어 체인이 끊긴다. 그런데 그 태그가 **시작**까지 포기시켜 앵커 없는
+통째 클립이 됐고, 그 클립이 bounds 로 넘어가 LLM 이 시작을 다시 찾고 있었다 —
+코드가 결정적으로 답할 수 있는 질문을 모델에게 물은 셈이다.
+
+실측(5경기, 앵커 없이 bounds 로 가던 16건): 10건은 구간 안에 '투구' 샷이 멀쩡히
+있었고, 그 위치는 8건이 장면 시작과 정확히 일치했다(vision3 가 이미 맞춘 것).
+나머지 1건이 v202 장면11 — 장면 2558s 인데 첫 투구 샷은 2583s 로, bounds 를 만든
+원인이던 바로 그 케이스가 규칙 하나로 풀린다. 남는 6건은 '투구' 샷 자체가 없는
+진짜 미해결이다.
+
 앵커부터 레시피 유형이 이어지는 동안 샷을 붙이고, 벗어나는 첫 샷에서 멈춘다.
 끝 확정 후 대사 꼬리 스냅: 끝에 걸친 해설 발화는 상한 안에서 발화 끝까지 연장.
 입력(r·segs·utts)은 읽기만 한다 — 결과는 새 dict (B4 불변 규약).
@@ -18,13 +30,8 @@ from log import get_logger
 log = get_logger(__name__)
 
 
-def clip(r: dict, segs: list[dict], utts: list[tuple[float, float, str]] = ()) -> dict:
-    """t_scene_baseball 행 1건 → {cs, ce, shots:[(s,e,type)], anchor, mode}."""
-    lo, hi = r["s"], r["e"]
-    shots = [s for s in segs if s["s"] < hi and s["e"] > lo]
-    if not shots or set(r["tags"]) & vocab.FULL_CLIP_TAGS:
-        return _full(r, shots, "통째(레시피 제외 태그)" if shots else "통째(샷 없음)", utts)
-
+def _anchor(r: dict, shots: list[dict]) -> dict | None:
+    """앵커 샷 — ★pitch_sec 이 속한 샷, 없으면 구간 안 첫 '투구' 샷 (모듈 docstring ①②)."""
     anchor = None
     if r["pitch_sec"] is not None:
         anchor = next((s for s in shots if s["s"] <= r["pitch_sec"] < s["e"]), None)
@@ -37,8 +44,29 @@ def clip(r: dict, segs: list[dict], utts: list[tuple[float, float, str]] = ()) -
                 anchor = nxt
     if anchor is None:
         anchor = next((s for s in shots if s["shot_type"] == "투구"), None)
+    return anchor
+
+
+def clip(r: dict, segs: list[dict], utts: list[tuple[float, float, str]] = ()) -> dict:
+    """t_scene_baseball 행 1건 → {cs, ce, shots:[(s,e,type)], anchor, mode}."""
+    lo, hi = r["s"], r["e"]
+    shots = [s for s in segs if s["s"] < hi and s["e"] > lo]
+    if not shots:
+        return _full(r, shots, "통째(샷 없음)", utts)
+
+    anchor = _anchor(r, shots)
+    full_tag = bool(set(r["tags"]) & vocab.FULL_CLIP_TAGS)
     if anchor is None:
-        return _full(r, shots, "통째(투구 앵커 없음 — L2 폴백)", utts)
+        return _full(r, shots,
+                     "통째(레시피 제외 태그)" if full_tag else "통째(투구 앵커 없음 — L2 폴백)",
+                     utts)
+    if full_tag:
+        # 끝은 장면 그대로(레시피로 좁히지 않는다), 시작만 앵커로 — 정책 분리.
+        picked = shots[shots.index(anchor):]
+        ce, snapped = _snap_tail(hi, utts)
+        return {"cs": max(anchor["s"], lo), "ce": ce, "anchor": (anchor["s"], anchor["e"]),
+                "shots": [(s["s"], s["e"], s["shot_type"]) for s in picked],
+                "mode": "끝 통째(레시피 제외 태그)" + ("+대사꼬리" if snapped else "")}
 
     allow = set().union(*(vocab.CUT_RECIPE.get(t, set()) for t in r["tags"]))
     # 큰 플레이(병살·적시타 등)는 라벨 기준 추가 유형까지 — 단 초 상한 (리플레이 차단)
