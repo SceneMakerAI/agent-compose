@@ -84,15 +84,15 @@ def test_apply_rejects_values_outside_candidates():
     """제시하지 않은 초는 기각 — 모델이 시각을 지어낼 수 없다."""
     c = clip(cs=115.0, ce=120.0)
     rows = bounds.start_rows([c], SEGS, UTTS, [])
-    bounds.apply_start([c], rows, "장면 1: 시작 999")
+    bounds.apply_start([c], rows, "999s")
     assert (c["cut"]["cs"], c["cut"]["ce"]) == (115.0, 120.0)
 
 
 def test_apply_moves_when_candidate_matches():
     c = clip(cs=100.0, ce=160.0)
     rows = bounds.start_rows([c], SEGS, UTTS, [])
-    start = int(rows[0]["starts"][0]["sec"])
-    moved = bounds.apply_start([c], rows, f"장면 1: 시작 {start}")
+    start = int(rows[0]["cands"][0]["sec"])
+    moved = bounds.apply_start([c], rows, f"{start}s")
     assert c["cut"]["cs"] == float(start) and moved
 
 
@@ -120,8 +120,8 @@ def test_apply_keeps_candidate_fraction():
             {"s": 108.3, "e": 120.0, "shot_type": "투구", "summary": "투수가 던진다"}]
     c = clip(cs=100.0, ce=140.0)
     rows = bounds.start_rows([c], segs, UTTS, [])
-    assert rows[0]["starts"][0]["sec"] == 108.3       # 후보는 소수를 그대로 들고 있다
-    bounds.apply_start([c], rows, "장면 1: 시작 108")
+    assert rows[0]["cands"][0]["sec"] == 108.3       # 후보는 소수를 그대로 들고 있다
+    bounds.apply_start([c], rows, "108s")
     assert c["cut"]["cs"] == 108.3
 
 
@@ -148,23 +148,35 @@ def test_end_candidates_skip_ad_boundary():
     assert 124 in [int(sec) for sec, _ in got]
 
 
-def test_start_rows_marks_current_start_is_pitch():
-    """현재 시작이 이미 투구 샷이면 그렇게 표시한다 — 규칙에 있는데 재료가 없었다."""
+def test_start_rows_carries_current_shot():
+    """현재 시작의 화면·해설이 실린다 — 모델이 "이미 투구 지점인가"를 볼 재료다."""
     c = clip(cs=106.0, ce=120.0)
-    rows = bounds.start_rows([c], SEGS, UTTS, [])
-    assert rows[0]["cur"]["at_shot_start"] is True
+    rows = bounds.start_rows([c], SEGS, UTTS, [(100, 101)])
     assert rows[0]["cur"]["shot_type"] == "투구"
+    assert rows[0]["cur"]["shot"] == "투수가 공을 던진다"
 
 
-def test_start_user_attaches_narrative_per_candidate():
-    """후보 밑에 그 시각의 화면·해설이 붙는다 — 따로 주면 모델이 조인해야 한다."""
+def test_start_user_lists_window_and_choices():
+    """구간의 대사·화면을 통째로 주고, 후보는 질문 줄에 초 값으로 나열한다."""
     from flow.prompts import start_user
 
-    utts = [(104.0, 112.0, "던집니다"), *UTTS]     # 후보 시각에 걸리는 발화
-    rows = bounds.start_rows([clip(cs=100.0, ce=160.0)], SEGS, utts, [])
+    utts = [(104.0, 112.0, "던집니다"), *UTTS]
+    rows = bounds.start_rows([clip(cs=100.0, ce=160.0)], SEGS, utts, [(112, 113)])
     text = start_user(rows)
-    assert "화면 [투구] 투수가 공을 던진다" in text
-    assert "해설" in text
+    assert "[현재 장면] 100s" in text
+    assert "[대사]" in text and "[화면]" in text
+    assert "[질문] 현재(100s)의 투구 플레이가 시작되는 올바른 시각을 고르세요:" in text
+    assert "112s / 유지" in text
+
+
+def test_apply_start_keeps_when_model_says_stay():
+    """'유지' 면 아무것도 옮기지 않는다."""
+    from flow import bounds as b
+
+    c = clip(cs=115.0, ce=160.0)
+    rows = b.start_rows([c], SEGS, UTTS, [(106, 107)])
+    assert b.apply_start([c], rows, "유지") == []
+    assert c["cut"]["cs"] == 115.0
 
 
 def test_apply_accepts_unit_suffix():
@@ -189,25 +201,6 @@ def test_apply_accepts_unit_suffix():
 _SEGS2 = [{"s": 90.0, "e": 130.0, "shot_type": "리액션", "summary": "타자가 걸어간다"},
           {"s": 130.0, "e": 200.0, "shot_type": "투구", "summary": "투수가 공을 던진다"}]
 _UTTS2 = [(90.0, 130.0, "다른 문장이다"), (130.0, 200.0, "같은 문장이 계속된다")]
-
-
-def test_indistinguishable_start_candidates_are_merged():
-    """화면·해설이 같은 시작 후보는 하나로 — 고를 근거가 없으면 사고만 태운다.
-
-    실측(v200 comp16 장면61): 후보 11397·11394·11392 의 해설이 글자 그대로 같았고
-    화면은 아예 없었다. thinking 94,575자를 쓰고 본문 없이 재시도로 떨어졌다.
-    반면 후보 5개가 전부 다른 해설을 단 장면11 은 4,343자로 즉결이었다.
-    """
-    c = clip(cs=125.0, ce=220.0)
-    rows = bounds.start_rows([c], _SEGS2, _UTTS2, [(135, 136), (145, 146), (155, 156)])
-    assert len(rows[0]["starts"]) == 1, rows[0]["starts"]
-
-
-def test_start_candidate_same_as_current_is_dropped():
-    """현재와 화면·해설이 같은 후보는 대안이 아니다 — 그 답은 이미 '유지'다."""
-    c = clip(cs=135.0, ce=190.0)          # 135 는 130~200 투구 샷 안 (앞쪽엔 후보 없음)
-    rows = bounds.start_rows([c], _SEGS2, _UTTS2, [(150, 151)])   # 같은 샷·같은 발화
-    assert rows == []            # 남는 후보가 없으면 행 자체를 내지 않는다 (물을 게 없다)
 
 
 def test_dedup_keeps_speech_end_over_screen():

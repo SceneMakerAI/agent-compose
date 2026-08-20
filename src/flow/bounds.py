@@ -241,6 +241,16 @@ def start_candidates(clip: dict, segs: list[dict], pitches: list[tuple[int, int]
     return sorted(uniq.values(), key=lambda x: abs(x[0] - cs))[:CAND_MAX]
 
 
+# 구간 목록 상한 — 후보~현재 사이가 길어도 프롬프트가 불어나지 않게.
+CONTEXT_MAX = 12
+
+
+def _window(items: list, lo: float, hi: float, key_s, key_e) -> list:
+    """[lo, hi] 와 겹치는 항목만 시간순 (뒤쪽 우선으로 상한 적용 — 가까울수록 중요)."""
+    hit = [x for x in items if key_e(x) > lo and key_s(x) < hi]
+    return hit[-CONTEXT_MAX:]
+
+
 def start_rows(clips: list[dict], segs: list[dict], utts: list,
                pitches: list[tuple[int, int]]) -> list[dict]:
     """refine_start_bound 에 낼 행 — **투구 앵커가 없는 클립만**.
@@ -248,29 +258,30 @@ def start_rows(clips: list[dict], segs: list[dict], utts: list,
     앵커가 잡힌 클립은 cut 이 정한 시작이 이미 그 플레이의 투구 샷이다(실측
     2026-08-20: v200 66/67 · v201 66/71 · v202 51/56 이 '투구' 시작). 그걸 모델이
     되돌리는 쪽이 손해였다 — v201 comp20 의 장면9(-33s)·42(-37.3s).
+
+    행에는 후보 초 목록과 함께 **후보~현재 구간의 대사·화면을 통째로** 싣는다
+    (2026-08-20 형식 변경). 후보마다 그 시각의 한 줄만 붙이던 방식은 후보의 화면
+    분류가 NULL 이면(v203 실측 81%) 보여줄 게 없어 후보끼리 구별되지 않았다.
+    구간을 통으로 주면 모델이 "그 사이에 무슨 일이 있었나"로 판별할 수 있다.
     """
     rows = []
     for c in clips:
         if c["cut"].get("anchor") is not None:
             continue
         cs, ce = c["cut"]["cs"], c["cut"]["ce"]
-        cur = _ctx(cs, segs, utts)
-        at_start = _shot_at(cs, segs)
-        cur["at_shot_start"] = bool(at_start and abs(at_start["s"] - cs) <= 1)
-        # 현재와 구별 불가한 후보는 빼고(답이 이미 "유지"다) 나머지를 접는다.
-        # 접힐 때 남길 대표는 **현재와 해설이 다른 쪽**을 먼저 본다 — 시간만으로 고르면
-        # 현재의 발화가 아직 이어지는 후보가 이기는데(v200 장면21: 3636 이 3640 을 밀어냄)
-        # 정작 그 플레이를 말하는 건 다른 쪽이다("김성윤의 적시타가 나옵니다").
-        cur_utt = cur.get("utt") or ""
-        cands = [{"sec": sec, "why": why, "gap": round(sec - cs), **_ctx(sec, segs, utts)}
-                 for sec, why in start_candidates(c, segs, pitches)]
-        cands.sort(key=lambda x: ((x.get("utt") or "") == cur_utt, abs(x["sec"] - cs)))
-        starts = sorted(_dedup(cands, drop_sig=_sig(cur), near=MERGE_GAP_SEC),
-                        key=lambda x: abs(x["sec"] - cs))
-        if starts:
-            rows.append({"scene_id": c["scene_id"], "tags": c["tags"],
-                         "inning": c.get("inning") or "", "cs": cs, "ce": ce,
-                         "cur": cur, "starts": starts})
+        cands = start_candidates(c, segs, pitches)
+        if not cands:
+            continue
+        lo = min(cs, min(sec for sec, _ in cands))
+        hi = max(cs, max(sec for sec, _ in cands))
+        rows.append({
+            "scene_id": c["scene_id"], "tags": c["tags"],
+            "inning": c.get("inning") or "", "cs": cs, "ce": ce,
+            "cur": _ctx(cs, segs, utts),
+            "cands": [{"sec": sec, "why": why} for sec, why in sorted(cands)],
+            "utts": _window(utts, lo, hi, lambda u: u[0], lambda u: u[1]),
+            "shots": _window(segs, lo, hi, lambda x: x["s"], lambda x: x["e"]),
+        })
     return rows
 
 
@@ -284,7 +295,6 @@ def start_rows(clips: list[dict], segs: list[dict], utts: list,
 # 탓인지 구분되지 않는다.
 _UNIT = r"(?:초|s|sec)?"
 _END_LINE = re.compile(rf"장면\s*(\d+)\s*[:：]\s*(?:끝\s*)?(유지|\d+){_UNIT}")
-_START_LINE = re.compile(rf"장면\s*(\d+)\s*[:：]\s*(?:시작\s*)?(유지|\d+){_UNIT}")
 
 
 def _match(cands: list[dict], sec: int) -> float | None:
@@ -328,6 +338,30 @@ def apply_end(clips: list[dict], rows: list[dict], text: str) -> list[str]:
 
 
 def apply_start(clips: list[dict], rows: list[dict], text: str) -> list[str]:
-    """시작 제안 처분 — 이동 기록을 돌려준다."""
-    return _apply(clips, rows, text, field="cs", key="starts",
-                  pattern=_START_LINE, label="시작")
+    """시작 제안 처분 — 응답은 **초 값 하나 또는 "유지"** (장면 번호 없음).
+
+    클립 1건 = 콜 1건이라 번호가 없어도 어느 클립인지 모호하지 않다. 후보 밖의 값은
+    기각한다 — 모델이 시각을 지어낼 수 없어야 한다.
+    """
+    if not rows:
+        return []
+    row = rows[0]
+    by_id = {c["scene_id"]: c for c in clips}
+    cut_ = by_id.get(row["scene_id"], {}).get("cut")
+    if cut_ is None:
+        return []
+    body = text.strip()
+    if "유지" in body:
+        return []
+    m = re.search(r"(\d+)", body)
+    if not m:
+        log.info("bounds 기각: 장면%d 시작 응답 해석 불가 %r", row["scene_id"], body[:40])
+        return []
+    new = int(m.group(1))
+    if (hit := _match(row["cands"], new)) is None:
+        log.info("bounds 기각: 장면%d 시작 %s (후보 밖)", row["scene_id"], new)
+        return []
+    moved = [f"장면{row['scene_id']} 시작 {cut_['cs']:.1f}→{hit:.1f}"]
+    cut_["cs"] = hit
+    cut_["mode"] += "+시작보정"
+    return moved
