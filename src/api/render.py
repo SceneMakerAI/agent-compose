@@ -20,6 +20,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
 
+from db.compose_repo import RENDER_FAIL, RENDER_OK, RENDER_RUNNING
 from db.status_repo import COMPOSE_ERROR_RENDER, COMPOSE_ERROR_STAMP, COMPOSE_OK, COMPOSE_RENDER
 from log import bind_v_id, get_logger
 from render.payload import build_request
@@ -27,8 +28,11 @@ from render.payload import build_request
 log = get_logger(__name__)
 router = APIRouter()
 
-_RENDERING: dict[int, int] = {}     # comp_id → v_id (진행 중 — 단일 워커 전제, ingest 와 동일)
+_RENDERING: dict[int, int] = {}     # comp_id → v_id (이 프로세스가 감시 중인 렌더)
 _POLL_FAIL_MAX = 5                  # 연속 조회 실패 상한 (일시 장애는 넘기고, 지속되면 포기)
+# 워커 상태 문자열 → t_compose.render_status (응답을 DB 값과 같은 뜻으로 맞춘다)
+_RENDER_STATUS = {"done": RENDER_OK, "running": RENDER_RUNNING,
+                  "accepted": RENDER_RUNNING, "error": RENDER_FAIL}
 
 
 class RenderRequest(BaseModel):
@@ -71,13 +75,23 @@ async def post_render(req: RenderRequest, request: Request,
             "rendered_at": comp["render_datetime"].isoformat(),
         })
 
-    if req.comp_id in _RENDERING:
-        # 비동기라 완료 전에는 render_datetime 이 NULL — 진행 중 중복은 이쪽이 막는다
-        raise HTTPException(409, detail={
-            "code": "RENDER_IN_PROGRESS",
-            "comp_id": req.comp_id,
-            "message": "이미 렌더가 진행 중입니다.",
-        })
+    if comp["render_status"] == RENDER_RUNNING:
+        # 진행 중 중복 차단 — 완료 전에는 render_datetime 이 NULL 이라 이 컬럼이 근거다.
+        # force 여도 뚫지 않는다: 워커가 같은 출력 경로를 동시에 쓰게 된다.
+        if req.comp_id in _RENDERING or not await _reconcile(st, comp):
+            raise HTTPException(409, detail={
+                "code": "RENDER_IN_PROGRESS",
+                "comp_id": req.comp_id,
+                "message": "이미 렌더가 진행 중입니다.",
+            })
+        # 여기까지 왔으면 고아(재기동으로 감시가 끊긴 채 남은 1)를 정정한 것 — 진행 허용.
+        comp = await st.compose_repo.fetch(req.comp_id)
+        if comp["render_datetime"] and not req.force:
+            raise HTTPException(409, detail={
+                "code": "COMPOSE_ALREADY_RENDERED",
+                "comp_id": req.comp_id,
+                "rendered_at": comp["render_datetime"].isoformat(),
+            })
 
     try:
         payload = build_request(comp["v_id"], req.comp_id, comp["clips"], req.bumper, sync=False)
@@ -131,8 +145,9 @@ async def get_render(comp_id: int, request: Request) -> dict:
     v_id = comp["v_id"]
     # force 재렌더 중이면 render_datetime 은 직전 렌더의 시각이라 DB 지름길이 거짓말을 한다
     # (지금 도는 렌더를 done 으로 보고) — 진행 중일 때는 워커 상태를 그대로 묻는다
-    if comp["render_datetime"] and comp_id not in _RENDERING:
+    if comp["render_datetime"] and comp["render_status"] != RENDER_RUNNING:
         return {"comp_id": comp_id, "v_id": v_id, "status": "done",
+                "render_status": comp["render_status"],
                 "rendered_at": comp["render_datetime"].isoformat()}
 
     try:
@@ -150,9 +165,41 @@ async def get_render(comp_id: int, request: Request) -> dict:
         # 폴러가 유실된 경우의 보정 지점 — 조회 한 번으로 스탬프가 되살아난다
         stamped = await _stamp_done(st, comp_id, v_id)
         return {"comp_id": comp_id, "v_id": v_id, **res,
+                "render_status": _RENDER_STATUS.get("done") if stamped else None,
                 **({} if stamped else {"stamped": False,
                                        "message": "렌더는 완료됐으나 완료 기록에 실패했습니다."})}
-    return {"comp_id": comp_id, "v_id": v_id, **res}
+    return {"comp_id": comp_id, "v_id": v_id, **res,
+            "render_status": _RENDER_STATUS.get(res.get("status"))}
+
+
+async def _reconcile(st, comp: dict) -> bool:
+    """진행중(1)으로 남은 편성을 워커에 물어 정정한다 — True 면 더는 진행중이 아니다.
+
+    배포·재기동으로 감시가 끊기면 render_status 가 1 인 채 남는다(고아). 그 값을 그대로
+    믿으면 그 편성은 영영 렌더할 수 없으므로, 메모리에 감시가 없을 때만 워커에게 진짜
+    상태를 물어 확정한다. **판단이 불가능하면 막는 쪽으로 둔다**(False) — 실제로 돌고
+    있는 렌더에 같은 출력 경로로 한 번 더 보내는 것이 더 나쁘다.
+    """
+    comp_id, v_id = comp["comp_id"], comp["v_id"]
+    try:
+        res = await st.render.status(v_id, comp_id)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            log.warning("렌더 고아 정정: comp_id=%s — 워커가 모르는 작업(실패 처리)", comp_id)
+            await st.compose_repo.mark_render_failed(comp_id)
+            return True
+        return False
+    except httpx.HTTPError:
+        return False            # 워커 미기동 등 — 판단 불가면 막는다
+    status = res.get("status")
+    if status in ("accepted", "running"):
+        return False
+    if status == "done":
+        await _stamp_done(st, comp_id, v_id)
+        return True
+    log.warning("렌더 고아 정정: comp_id=%s — 워커 상태 %s (실패 처리)", comp_id, status)
+    await st.compose_repo.mark_render_failed(comp_id)
+    return True
 
 
 def _unknown(comp_id: int, v_id: int, e: Exception) -> dict:
@@ -201,6 +248,7 @@ async def _watch(request: Request, comp_id: int, v_id: int) -> None:
                     if fails >= _POLL_FAIL_MAX:
                         await st.status.set(v_id, COMPOSE_ERROR_RENDER,
                                             f"렌더 상태 조회 연속 실패: {type(e).__name__}: {e}")
+                        await st.compose_repo.mark_render_failed(comp_id)
                         return
                     continue
                 fails = 0
@@ -212,10 +260,13 @@ async def _watch(request: Request, comp_id: int, v_id: int) -> None:
                 if status == "error":
                     log.error("렌더 실패: comp_id=%s %s", comp_id, res.get("error"))
                     await st.status.set(v_id, COMPOSE_ERROR_RENDER, res.get("error") or "")
+                    await st.compose_repo.mark_render_failed(comp_id)
                     return
             log.error("렌더 감시 타임아웃: comp_id=%s (%.0f초)", comp_id, st.settings.render_timeout)
             await st.status.set(v_id, COMPOSE_ERROR_RENDER,
                                 f"렌더 {st.settings.render_timeout:.0f}초 내 미완료 (워커 확인 필요)")
+            # 타임아웃은 워커가 나중에 끝냈을 수 있다 — 실패로 두되 GET 조회가 보정한다
+            await st.compose_repo.mark_render_failed(comp_id)
     finally:
         # 취소(종료 등)로 빠져나가도 진행 중 표시는 반드시 푼다
         _RENDERING.pop(comp_id, None)

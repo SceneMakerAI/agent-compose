@@ -217,6 +217,7 @@ async def _render_after(st, req: ComposeRequest, comp_id: int, status: str,
         result = await st.render.render(payload)
     except httpx.HTTPError as e:
         log.error("원샷 렌더 실패: comp_id=%s %s: %s", comp_id, type(e).__name__, e)
+        await st.compose_repo.mark_render_failed(comp_id)
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
     log.info("원샷 렌더 완료: comp_id=%s %s", comp_id, result)
     return result
