@@ -48,7 +48,7 @@ _NODE_CODE = {"rephrase_query": COMPOSE_PLAN, "retrieve_evidence": COMPOSE_PLAN,
               "select_clips": COMPOSE_PLAN, "retry_select": COMPOSE_PLAN,
               "set_bounds": COMPOSE_CUT, "refine_bounds": COMPOSE_CUT,
               "score_match": COMPOSE_VERIFY, "drop_unmatched": COMPOSE_VERIFY,
-              "order_clips": COMPOSE_VERIFY, "fill_budget": COMPOSE_VERIFY}
+              "fill_budget": COMPOSE_VERIFY}
 
 
 class ComposeRequest(BaseModel):

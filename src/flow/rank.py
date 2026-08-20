@@ -1,4 +1,6 @@
-"""order_clips 의 폴백 정렬 + 인벤토리 복사 — rank — 중요도 계산·정렬 (순수 계산, LLM 무관 — bench4 compose/rank.py 이식).
+"""장면 중요도 점수 + 인벤토리 복사 — rank — (순수 계산, LLM 무관 — bench4 compose/rank.py 이식).
+
+score 는 fill_budget 의 정렬(select.order_rest)이 같은 이닝 안에서 우열을 가릴 때 쓴다.
 
 예산 절단은 여기서 하지 않는다 — set_bounds 가 클립을 줄인 뒤 assemble 이 실제 EDL
 길이로 채택/충원한다 (미리 자르면 예산 미달). 여기서는 순서와 예비 풀만 만든다.

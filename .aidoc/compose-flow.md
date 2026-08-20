@@ -16,12 +16,10 @@ START → rephrase_query → retrieve_evidence → select_clips★ → set_bound
                                          END                               │
                                                                     drop_unmatched
                                                                            │
-                                                                     order_clips★
-                                                                           │
                                                                      fill_budget → END
 ```
 
-★ = LLM 콜. happy path 는 5노드에서 콜이 나가고, refine_bounds·score_match 는
+★ = LLM 콜. happy path 는 4노드에서 콜이 나가고, refine_bounds·score_match 는
 **클립당 1콜을 동시에** 보낸다 (묶어 보내면 전송이 직렬이라 GPU 가 논다 — 실측 v201
 24클립 10분 26초 동안 서버 Running 1·KV 3%).
 
@@ -40,8 +38,7 @@ START → rephrase_query → retrieve_evidence → select_clips★ → set_bound
 | refine_bounds | ★ 클립당 | **앵커 없는 클립만** 경계 후보를 제시하고 고르게 한다. 시작 후보는 앞으로만 (되돌리는 방향은 전부 앞 플레이의 투구 — 5경기 29건 전수) |
 | score_match | ★ 클립당 | 질의 일치도 0~3 + 완결성. **기각권 없음** — 점수만 매긴다 |
 | drop_unmatched | — | 0점 제외 (필수 장면은 예외 — 사실이 소견을 이긴다) |
-| order_clips | ★ | 남은 후보를 질의에 맞는 순서로 줄 세운다. 담을지는 정하지 않는다 |
-| fill_budget | — | 층 순서로 예산만큼 담는다. **절단이 마지막**이라 총 길이가 정확하다 |
+| fill_budget | — | 순서(일치도→이닝 분산→중요도)를 정하고 예산만큼 담는다. **절단이 마지막**이라 총 길이가 정확하다 |
 | end_empty | — | picked=[], status=empty |
 
 **절단이 마지막인 이유**: 예전에는 경계 확정 전에 잘랐고 그 뒤 끝 보정이 끝을 늘려

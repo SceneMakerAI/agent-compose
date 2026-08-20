@@ -20,7 +20,7 @@ COMPOSE_INGEST = 4010        # 증거 색인 중
 # 순서는 단조여야 한다: 되돌아가면 화면 진행이 뒤로 간다 (_NODE_CODE 참조).
 COMPOSE_PLAN = 4020          # 장면 선곡 (rephrase_query·retrieve_evidence·select_clips·retry_select)
 COMPOSE_CUT = 4030           # 구간 확정 (set_bounds·refine_bounds)
-COMPOSE_VERIFY = 4040        # 검수·확정 (score_match·drop_unmatched·order_clips·fill_budget)
+COMPOSE_VERIFY = 4040        # 검수·확정 (score_match·drop_unmatched·fill_budget)
 COMPOSE_RENDER = 4050        # mp4 렌더링 중
 COMPOSE_ERROR = 4900         # 편성 실패 (일반)
 COMPOSE_ERROR_SOURCE = 4910  # 발행본 없음 (publish 선행 필요)

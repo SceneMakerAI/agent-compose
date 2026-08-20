@@ -1,8 +1,7 @@
 """compose 그래프 — 질의 1건 → 편성.
 
   rephrase_query ─► retrieve_evidence ─► select_clips ─► set_bounds
-     ─► refine_bounds ─► score_match ─► drop_unmatched ─► order_clips
-     ─► fill_budget ─► END
+     ─► refine_bounds ─► score_match ─► drop_unmatched ─► fill_budget ─► END
                           ▲
      select_clips ◄── retry_select ◄──┤ (0건·재시도 여유)
                        end_empty ◄────┘ (0건·소진) ──► END
@@ -249,8 +248,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
     def drop_unmatched_node(st: ComposeState) -> dict:
         """score_match 0점 제외 — 순수 필터. 필수 장면은 예외(사실이 소견을 이긴다).
 
-        order_clips 에 넘어가는 후보를 줄여 프롬프트를 짧게 하고, "무관한 클립으로
-        예산을 채우는" 경로를 fill_budget 이전에 끊는다.
+        "무관한 클립으로 예산을 채우는" 경로를 fill_budget 이전에 끊는다.
         """
         scores = st.get("scores", {})
         keep, cut_ = [], []
@@ -264,44 +262,8 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             tr.node("drop_unmatched", kept=len(keep), zero=[c["scene_id"] for c in cut_])
         return {"clips": keep, "zero_dropped": [(c["scene_id"], "질의와 무관(score_match 0점)")
                                                 for c in cut_]}
-
-    async def order_clips_node(st: ComposeState) -> dict:
-        """남은 후보를 질의에 맞는 **순서**로 줄 세운다 (1콜 — 비교라 나눌 수 없다).
-
-        담을지 말지는 정하지 않는다. 순서만 받고 예산 합산·절단은 fill_budget 이 한다 —
-        예산 절단은 산술이고 LLM 은 산술을 못 한다(실측: 900초 요청에 947~1018초).
-        """
-        clips, spec = st["clips"], st["spec"]
-        scores = st.get("scores", {})
-        must = [c for c in clips if select_mod.is_must(c)]
-        rest = [c for c in clips if not select_mod.is_must(c)]
-        if not rest:
-            return {"order": []}
-        used = sum(r["cut"]["ce"] - r["cut"]["cs"] for r in must)
-        left = max(0, int(spec["budget"] - used))
-        # 필수층이 예산을 다 쓰면 순위를 매겨도 담길 자리가 없다 — 1~2분짜리 콜을
-        # 낭비하지 않는다 (v201 실측: 필수 16건 1103s > 예산 900s → 남은 0s).
-        if left < min(c["cut"]["ce"] - c["cut"]["cs"] for c in rest):
-            log.info("order_clips 생략: 남은 예산 %ds 로는 최단 후보도 못 담는다", left)
-            return {"order": []}
-        try:
-            text = await llm.chat(
-                prompts.RANK_SYSTEM,
-                prompts.rank_user(
-                    st["query"], st["inv"].game_line, left,
-                    sorted(must, key=lambda c: c["cut"]["cs"]),
-                    [(c, scores.get(c["scene_id"], {}).get("score",
-                                                           select_mod.DEFAULT_SCORE))
-                     for c in sorted(rest, key=lambda c: c["cut"]["cs"])]),
-                thinking=True, trace=st.get("trace"), name="order_clips")
-            order = select_mod.parse_order(text, {c["scene_id"] for c in rest})
-        except Exception as e:                       # noqa: BLE001 — 폴백이 있다
-            log.warning("order_clips 실패(점수순 폴백): %s", e)
-            order = []
-        log.info("order_clips: 후보 %d건 순서 %s", len(rest), order or "(폴백)")
-        if tr := st.get("trace"):
-            tr.node("order_clips", asked=len(rest), order=order, budget_left=left)
-        return {"order": order}
+        
+    
 
     def fill_budget_node(st: ComposeState) -> dict:
         """예산 확정 — 층 순서로 채우고, 마지막이라 예산이 정확하다."""
@@ -311,7 +273,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             picked, spare = _assemble(clips, spec["budget"])
             total = sum(r["cut"]["ce"] - r["cut"]["cs"] for r in picked)
             return {"picked": picked, "spare": spare, "total": int(total), "status": "ok"}
-        picked, dropped, total = select_mod.choose(clips, spec, scores, st.get("order"))
+        picked, dropped, total = select_mod.choose(clips, spec, scores)
         if not picked:
             picked = select_mod.rescue_longest(clips, spec["budget"])
             total = int(sum(r["cut"]["ce"] - r["cut"]["cs"] for r in picked))
@@ -337,7 +299,6 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
     g.add_node("refine_bounds", refine_bounds_node)
     g.add_node("score_match", score_match_node)
     g.add_node("drop_unmatched", drop_unmatched_node)
-    g.add_node("order_clips", order_clips_node)
     g.add_node("fill_budget", fill_budget_node)
     g.add_node("end_empty", end_empty_node)
     g.add_edge(START, "rephrase_query")
@@ -350,8 +311,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
     g.add_edge("retry_select", "select_clips")
     g.add_edge("refine_bounds", "score_match")
     g.add_edge("score_match", "drop_unmatched")
-    g.add_edge("drop_unmatched", "order_clips")
-    g.add_edge("order_clips", "fill_budget")
+    g.add_edge("drop_unmatched", "fill_budget")
     g.add_edge("fill_budget", END)
     g.add_edge("end_empty", END)
     return g.compile()

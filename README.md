@@ -8,7 +8,7 @@ Milvus(`sm_scene_evidence`)에 색인한다.
 질의 → rephrase_query(질의 재작성) → retrieve_evidence(벡터 검색)
      → select_clips(LLM 선곡) → set_bounds(구간 확정, 규칙)
      → refine_bounds(LLM 경계 보정) → score_match(LLM 채점)
-     → drop_unmatched → order_clips(LLM 순서) → fill_budget(예산 확정) → 저장
+     → drop_unmatched → fill_budget(순서·예산 확정) → 저장
 ```
 
 - LLM은 **제안**만(선곡·끝 보정·소견), **처분은 결정적 코드**가 한다

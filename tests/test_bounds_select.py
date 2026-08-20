@@ -144,31 +144,39 @@ def test_must_layer_survives_zero_score():
     assert total == 30
 
 
-def test_llm_order_drives_fill():
-    """rank 가 준 순서대로 담는다 — 점수가 낮아도 순위가 앞서면 먼저다."""
+def test_score_beats_inning_spread():
+    """일치도가 1순위 — 이닝 분산이 질의 부합도를 뒤집지 않는다."""
     clips = [clip(1, 0, 40, tags="범타", delta=0, inning="1회 초"),
              clip(2, 100, 140, tags="범타", delta=0, inning="2회 초"),
              clip(3, 200, 240, tags="범타", delta=0, inning="3회 초")]
     scores = {1: {"score": 3, "complete": True, "reason": ""},
               2: {"score": 1, "complete": True, "reason": ""},
               3: {"score": 3, "complete": True, "reason": ""}}
-    picked, _d, _t = select.choose(clips, {**SPEC, "budget": 80}, scores, order=[2, 3, 1])
-    assert [c["scene_id"] for c in picked] == [2, 3]      # 1점짜리 2번이 먼저
+    picked, _d, _t = select.choose(clips, {**SPEC, "budget": 80}, scores)
+    assert [c["scene_id"] for c in picked] == [1, 3]      # 1점짜리 2번은 뒤로
 
 
-def test_order_missing_ids_go_last():
-    """순위에 없는 클립은 버리지 않고 뒤로 — 모델이 빠뜨린 것이지 빼라는 뜻이 아니다."""
-    clips = [clip(i, i * 100, i * 100 + 40, tags="범타", delta=0) for i in (1, 2, 3)]
-    # 40s × 3, 예산 80 → 두 건만 들어간다. 순위에 3만 있으면 3이 먼저 담긴다.
-    picked, dropped, _t = select.choose(clips, {**SPEC, "budget": 80}, {}, order=[3])
-    assert 3 in [c["scene_id"] for c in picked]
-    assert len(picked) == 2 and len(dropped) == 1
+def test_inning_round_robin_within_same_score():
+    """같은 일치도면 이닝을 돌아가며 담는다 — 한 이닝이 자리를 독식하지 않는다.
+
+    구 order_clips(LLM 1콜)가 하던 "이닝별 배분"을 결정적으로 대신한다.
+    """
+    # 1회 3건 · 2회 1건, 전부 동점수. 예산 80 → 2건. 1회가 둘 다 먹으면 안 된다.
+    clips = [clip(1, 0, 40, tags="범타", inning="1회 초"),
+             clip(2, 100, 140, tags="범타", inning="1회 초"),
+             clip(3, 200, 240, tags="범타", inning="1회 초"),
+             clip(4, 300, 340, tags="범타", inning="2회 초")]
+    picked, _d, _t = select.choose(clips, {**SPEC, "budget": 80}, {})
+    assert {c["inning"] for c in picked} == {"1회 초", "2회 초"}
 
 
-def test_parse_order_keeps_valid_only():
-    """실존 번호만, 중복 없이, 나온 순서대로."""
-    got = select.parse_order("순서: 15, 3, 99, 15, 31", {3, 15, 31})
-    assert got == [15, 3, 31]
+def test_round_robin_starts_from_must_innings():
+    """필수층이 이미 먹은 이닝은 뒤로 — '확정에 없는 이닝을 앞으로'가 카운터로 표현된다."""
+    must = clip(1, 0, 20, tags="홈런", labels="역전", inning="1회 초")
+    same = clip(2, 100, 140, tags="범타", inning="1회 초")
+    other = clip(3, 200, 240, tags="범타", inning="2회 초")
+    order = select.order_rest([same, other], [must], {})
+    assert [c["scene_id"] for c in order] == [3, 2]
 
 
 def test_budget_is_never_exceeded():
@@ -179,12 +187,12 @@ def test_budget_is_never_exceeded():
     assert sum(c["cut"]["ce"] - c["cut"]["cs"] for c in picked) == total
 
 
-def test_score_order_is_fallback_without_llm_order():
-    """rank 가 실패하면 점수순으로 채운다 — 콜 하나가 편성을 죽이지 않는다."""
+def test_higher_score_wins_the_last_slot():
+    """자리가 하나면 일치도가 높은 쪽이 담긴다."""
     clips = [clip(1, 0, 10, tags="범타", delta=0), clip(2, 20, 30, tags="범타", delta=0)]
     scores = {1: {"score": 1, "complete": True, "reason": ""},
               2: {"score": 3, "complete": True, "reason": ""}}
-    picked, _d, _t = select.choose(clips, {**SPEC, "budget": 10}, scores, order=None)
+    picked, _d, _t = select.choose(clips, {**SPEC, "budget": 10}, scores)
     assert [c["scene_id"] for c in picked] == [2]
 
 

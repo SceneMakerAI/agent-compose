@@ -44,7 +44,6 @@ class ComposeState(TypedDict, total=False):
     endfix_moved: list[str]  # 경계 이동 기록 (refine_bounds 가 채운다). 이름은 구 endfix
                              # 노드에서 왔고 API 응답 키라 유지 — 하류 계약이다.
     suspicions: list[tuple]  # verify 소견 [(scene_id, 사유)] — 점수 낮은 건만
-    order: list[int]         # order_clips 가 준 순서 — fill_budget 이 그대로 담는다
     zero_dropped: list       # 0점 제외분 [(scene_id, 사유)] — 리포트 합류용
     status: str              # ok | empty
     # --- 재배선(2026-08-20) 추가 ---
