@@ -192,9 +192,10 @@ def test_must_scenes_exceed_budget_on_purpose():
     """필수 장면은 예산을 넘겨서라도 담는다 — 예산은 목표지 상한이 아니다.
 
     실측(comp 1): v202 '홈런 모음' 예산 60초인데 홈런이 74초 한 건이라 0클립이 나갔다.
-    득점 장면이 빠지는 건 취향이 아니라 결함이라, 이제 넘겨서 담는다.
+    결정 장면이 빠지는 건 취향이 아니라 결함이라, 이제 넘겨서 담는다.
+    (필수 판정은 **결정 라벨**로 한다 — 득점만으로는 필수가 아니다, 방침 2026-08-20.)
     """
-    clips = [clip(1, 0, 74, tags="홈런", delta=1)]
+    clips = [clip(1, 0, 74, tags="홈런", labels="역전", delta=1)]
     picked, _d, total = select.choose(clips, {**SPEC, "budget": 60}, {})
     assert [c["scene_id"] for c in picked] == [1]
     assert total > 60
@@ -207,8 +208,9 @@ def test_must_layer_stops_at_slack_ceiling():
     허용이 답이 아니라 상한을 두는 게 답 — 상한에 걸리면 득점 작은 뒤쪽부터 떨어진다.
     """
     # 예산 100 → 상한 130. 100s + 25s = 125 까지는 담고, 그 뒤 60s 는 185 라 탈락.
-    clips = [clip(1, 0, 100, tags="홈런", delta=3), clip(2, 200, 225, tags="홈런", delta=2),
-             clip(3, 400, 460, tags="홈런", delta=1)]
+    clips = [clip(1, 0, 100, tags="홈런", labels="역전", delta=3),
+             clip(2, 200, 225, tags="홈런", labels="동점", delta=2),
+             clip(3, 400, 460, tags="홈런", labels="끝내기", delta=1)]
     picked, dropped, total = select.choose(clips, {**SPEC, "budget": 100}, {})
     assert [c["scene_id"] for c in picked] == [1, 2]
     assert total == 125                                      # 예산 초과 · 상한 이내

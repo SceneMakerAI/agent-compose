@@ -48,8 +48,41 @@ def _dur(c: dict) -> float:
 
 
 def is_must(c: dict) -> bool:
-    """사실이 보증하는 장면인가 — 득점이 났거나 결정 라벨이 붙었다."""
-    return c["score_delta"] > 0 or bool(set(c["label_list"]) & MUST_LABELS)
+    """사실이 보증하는 장면인가 — 결정 라벨이 붙었다.
+
+    **득점(score_delta > 0)은 조건이 아니다** (방침 2026-08-20). 득점 장면을 전부
+    필수로 두니 질의가 무엇이든 그 경기의 모든 득점이 강제 편입돼 선곡을 덮어썼다 —
+    v203 comp30 실측: "역전 장면만" 질의에 select_clips 는 역전 1건(장면5)만 골랐는데
+    회수가 득점 7건을 끌어와 8클립이 됐다. 득점 여부는 rank.score 의 가중치로 이미
+    반영되므로, 무엇을 담을지는 질의를 읽은 LLM 이 정한다.
+    """
+    return bool(set(c["label_list"]) & MUST_LABELS)
+
+
+def recover_must(scenes: list[dict], picked: list[int], spec: dict) -> list[int]:
+    """
+    Summary:
+        select_clips 가 놓친 필수 장면 중 **회수할 것**의 scene_id 목록.
+    Args:
+        scenes (list[dict]): 인벤토리 전체 장면.
+        picked (list[int]): select_clips 가 고른 scene_id.
+        spec (dict): 질의 해석 결과 — mode·targets 를 읽는다.
+    Returns:
+        list[int]: 회수 대상 scene_id (없으면 빈 목록).
+    Description:
+        회수는 "빠짐없이"가 미덕인 질의에서만 한다 (방침 2026-08-20):
+        - **pinpoint 는 회수하지 않는다.** 콕 집어 달라는 요청에 다른 장면을 끼워 넣으면
+          그건 요청한 물건이 아니다.
+        - collection 등에서도 **질의 대상(targets)에 걸린 라벨만** 회수한다. "역전 장면만"
+          에 경기 종료가 딸려 들어오던 문제(v203 comp30)가 여기서 갈린다.
+        - targets 가 비면(파싱 실패 등) 회수하지 않는다 — 근거 없는 편입을 만들지 않는다.
+    """
+    targets = set(spec.get("targets") or ())
+    if spec.get("mode") == "pinpoint" or not targets:
+        return []
+    return [r["scene_id"] for r in scenes
+            if r["scene_id"] not in picked and is_must(r)
+            and set(r["label_list"]) & targets]
 
 
 def _score(c: dict, scores: dict[int, dict]) -> int:

@@ -134,16 +134,17 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
     async def set_bounds_node(st: ComposeState) -> dict:
         """구간 확정 — 순위도 절단도 하지 않는다 (구 cutrank 의 1/3).
 
-        선곡분에 **필수 장면(득점·역전·동점·끝내기·경기 종료)을 합쳐서** 컷한다.
-        fill_budget 의 필수층이 일하려면 그 장면이 후보에 있어야 하는데, select_clips
-        가 놓치면 영영 들어올 수 없기 때문이다 (구 backfill 이 하던 회수를 여기서
-        보장한다). 구간 계산은 순수 함수라 몇 건 늘어도 비용이 없고, LLM 을 타는
+        선곡분에 **회수 대상 필수 장면을 합쳐서** 컷한다. fill_budget 의 필수층이
+        일하려면 그 장면이 후보에 있어야 하는데, select_clips 가 놓치면 영영 들어올 수
+        없기 때문이다 (구 backfill 이 하던 회수를 여기서 보장한다). 무엇을 회수하는지는
+        select.recover_must 가 정한다 — pinpoint 는 회수하지 않고, 그 외에도 질의
+        대상과 겹치는 라벨만 끌어온다(질의를 회수가 덮어쓰지 않게).
+        구간 계산은 순수 함수라 몇 건 늘어도 비용이 없고, LLM 을 타는
         refine_bounds·score_match 의 입력만 그만큼 커진다.
         """
         inv = st["inv"]
         picked = list(st["spec"]["picked"])
-        must = [r["scene_id"] for r in inv.scenes
-                if r["scene_id"] not in picked and select_mod.is_must(r)]
+        must = select_mod.recover_must(list(inv.scenes), picked, st["spec"])
         if must:
             log.info("set_bounds: 필수 장면 회수 %s (select_clips 미선곡)", must)
         clips = rank.order(list(inv.scenes), picked + must)

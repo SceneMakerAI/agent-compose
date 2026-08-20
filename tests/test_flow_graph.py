@@ -66,7 +66,7 @@ async def test_empty_after_replan():
 
 
 async def test_must_scene_recovered_when_select_clips_misses_it():
-    """select_clips 가 놓친 득점 장면을 필수층이 회수한다.
+    """select_clips 가 놓친 필수 장면을 회수한다 — 질의 대상에 걸린 라벨일 때만.
 
     선곡분만 구간 계산하면 빠뜨린 장면은 영영 들어올 수 없어 fill_budget 의
     필수층이 무의미해진다 (구 backfill 이 하던 회수).
@@ -75,11 +75,27 @@ async def test_must_scene_recovered_when_select_clips_misses_it():
               scene(2, 200, 240, tags="안타", labels="역전,적시타", delta=1, pitch=202))
     inv = Inventory(v_id=999, scenes=scenes, segs=SEGS, utts=(),
                     game_line="g", inventory_text="(목록)")
-    plan_one = "모드: collection\n대상: 안타\n관점: 전체\n예산: 300\n선곡: 1\n사유: 2번 누락"
+    plan_one = "모드: collection\n대상: 안타, 역전\n관점: 전체\n예산: 300\n선곡: 1\n사유: 2번 누락"
     g = build_graph(StubLLM(select_clips=plan_one), StubEmb(), StubStore())
     st = await run_compose(g, inv, "안타 모음", 300)
     assert [r["scene_id"] for r in st["picked"]] == [1, 2]
     assert all("cut" not in s for s in scenes)              # B4 인벤토리 불변
+
+
+async def test_pinpoint_does_not_recover():
+    """pinpoint 질의는 회수하지 않는다 — 콕 집어 달라는데 다른 장면을 끼우지 않는다.
+
+    v203 comp30 실측: "역전 장면만" 에 select_clips 는 역전 1건만 골랐는데 회수가
+    득점 7건을 끌어와 8클립이 됐다. 질의를 회수가 덮어쓰면 안 된다.
+    """
+    scenes = (scene(1, 100, 130, tags="안타", labels="역전", delta=1, pitch=102),
+              scene(2, 200, 240, tags="안타", labels="적시타", delta=2, pitch=202))
+    inv = Inventory(v_id=999, scenes=scenes, segs=SEGS, utts=(),
+                    game_line="g", inventory_text="(목록)")
+    plan_one = "모드: pinpoint\n대상: 역전\n관점: 전체\n예산: 300\n선곡: 1\n사유: 역전만"
+    g = build_graph(StubLLM(select_clips=plan_one), StubEmb(), StubStore())
+    st = await run_compose(g, inv, "역전 장면만", 300)
+    assert [r["scene_id"] for r in st["picked"]] == [1]      # 2번(득점)은 끌려오지 않는다
 
 
 async def test_score_match_drives_drop_not_removal():
