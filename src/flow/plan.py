@@ -19,6 +19,9 @@ def render_situation(outs: int | None, bases: str | None) -> str:
     라벨로 표현되지 않는 유일한 정보라 인벤토리의 핵심 열이다 — 같은 범타라도
     '2사 만루'(위기 탈출)와 '무사 주자없음'(평범한 아웃)은 하이라이트 가치가 다른데
     둘 다 score_delta=0 이라 점수로도 갈리지 않는다.
+
+    (2026-08-20 제거를 검토했다가 유지 — 70장면 기준 900자라 프롬프트 절감이
+    2.6KB→2.3KB 에 그쳐 속도 이득이 없었다. 변별을 내주고 얻을 게 없다.)
     """
     if outs is None or bases is None:
         return "?"
