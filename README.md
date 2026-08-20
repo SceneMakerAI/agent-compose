@@ -6,13 +6,13 @@ Milvus(`sm_scene_evidence`)에 색인한다.
 
 ```
 질의 → rephrase_query(질의 재작성) → retrieve_evidence(벡터 검색)
-     → select_clips(LLM 선곡) → set_bounds(구간 확정, 규칙)
-     → refine_bounds(LLM 경계 보정) → score_match(LLM 채점)
-     → drop_unmatched → fill_budget(순서·예산 확정) → 저장
+     → select_clips(LLM 선곡) → refine_end_bound(LLM 끝 확정, 클립당 1콜)
+     → refine_start_bound(LLM 시작 확정, 앵커 없는 클립만) → finish → 저장
 ```
 
-- LLM은 **제안**만(선곡·끝 보정·소견), **처분은 결정적 코드**가 한다
-  (선곡 검산, 끝 검증기, verify 기각권 없음).
+- LLM은 **제안**만(선곡·경계), **처분은 결정적 코드**가 한다 — 선곡은 실존 장면으로
+  검산하고, 경계는 제시한 후보 밖의 초를 기각한다.
+- **선곡이 곧 편성이다** (2026-08-20): 채점·0점 제외·예산 절단·필수 회수를 폐기했다.
 - 색인 증거는 3종: `shot`(t_segment 캡션) / `stt`(t_dialogue 청크) /
   `etc`(하단 자막 OCR). 장면 귀속은 시간 겹침 기준.
 
@@ -65,18 +65,17 @@ curl 'localhost:8084/api/v1/ingest?v_id=202'
 ```bash
 curl -X POST localhost:8084/api/v1/compose \
   -H 'Content-Type: application/json' \
-  -d '{"v_id": 202, "query": "득점 장면 위주 하이라이트", "budget": 180}'
+  -d '{"v_id": 202, "query": "득점 장면 위주 하이라이트"}'
 # → {"job_id": "a1b2c3d4e5f6", "status": "running"}
 ```
 
-- `budget`(초)은 선택 — 주면 질의 해석보다 우선. 생략 시 질의에서 해석 (기본 180).
 - `render`(기본 **false**): true 면 편성 ok 후 worker-render 까지 이어 호출하는 원샷 —
   잡 결과에 `render` 필드({status, output_path} 또는 skipped/error 사유)가 추가된다.
   원샷은 **완주까지 기다린다**(단독 렌더는 접수만) — 잡 하나로 편성·렌더가 함께 끝난다.
   렌더 성공 시 `t_compose.render_datetime` 도 함께 기록된다.
   empty·이닝 결손이면 렌더를 생략하고 사유를 남기며, 렌더 실패가 편성 성공을 뒤집지 않는다.
   `bumper`(기본 true)는 render=true 일 때만 의미.
-- plan 노드가 thinking 이라 **총 1~3분** — 그래서 202 + 잡 폴링 패턴.
+- select_clips 가 thinking 이라 **총 1~3분** — 그래서 202 + 잡 폴링 패턴.
 - 질의는 어휘(태그·라벨)로 번역돼 선곡된다. "이닝별 하이라이트"는 이닝 커버리지,
   "득점 장면"은 적시타·역전·동점 등 득점 라벨 위주로 해석된다.
 
@@ -97,23 +96,23 @@ curl -X POST localhost:8084/api/v1/compose \
 {
   "status": "ok", "v_id": 202, "query": "...",
   "comp_id": 6,
-  "spec": {"mode": "collection", "targets": ["적시타", "역전"], "view": "전체",
-           "budget": 180, "picked": [25, 36, 38], "reason": "..."},
+  "spec": {"mode": "compose", "targets": ["적시타", "역전"], "view": "전체",
+           "picked": [25, 36, 38]},
   "clips": [
     {"scene_id": 38, "h_id": 3, "start": 8789, "end": 8809,
      "label": "안타", "labels": "역전,적시타", "inning": "6회 말",
      "score_before": "3-3", "score_after": "3-5", "cut_mode": "레시피+대사꼬리"}
   ],
   "duration": 96,
-  "suspicions": [[41, "verify 의심 사유 (클립은 유지됨)"]],
-  "endfix_moved": ["장면38 8805→8809"],
+  "end_moved": ["장면38 끝 8805.0→8809.0"],
+  "start_moved": ["장면5 시작 657.0→646.0"],
   "orphans": [{"s": 1810.0, "text": "장면 밖 증거 — 발행 누락 의심"}]
 }
 ```
 
 - `clips` 가 결과 본체 — `start`/`end` 는 초(int), 시간순.
 - `status: "empty"` = 조건에 맞는 장면 없음 (`clips: []`). 억지로 채우지 않는다.
-- `duration` 은 endfix 연장 때문에 budget 을 다소 넘을 수 있다.
+- 길이 제한이 없다 — 선곡된 장면이 그대로 편성된다(예산 절단 폐기).
 - **404** `JOB_NOT_FOUND`: 잡은 인메모리라 프로세스 재시작 시 소실 —
   결과는 `comp_id` 로 재조회한다.
 

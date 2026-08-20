@@ -30,7 +30,6 @@ class Inventory:
 
 class ComposeState(TypedDict, total=False):
     query: str
-    budget: int | None       # 명시 입력 (질의 해석보다 우선)
     inv: Inventory           # 불변 스냅샷 (위 규약)
     evidence: list[dict]     # retrieve_evidence 벡터 후보 [{scene_id,hits,sim,snippets}]
     evidence_orphan: list[dict]  # 장면밖 증거 (발행 누락 의심 — 리포트 표기 전용)
@@ -38,17 +37,12 @@ class ComposeState(TypedDict, total=False):
     attempt: int             # select_clips 호출 횟수
     spec: dict               # select_clips 명세 (mode/targets/view/budget/picked)
     picked: list[dict]       # 채택 클립 (cut 결과 포함 — 전부 복사본 행)
-    spare: list[dict]        # 예산 초과 예비 풀
-    total: int               # 채택분 컷 후 총 길이(초)
-    endfix_moved: list[str]  # 경계 이동 기록 (refine_bounds 가 채운다). 이름은 구 endfix
-                             # 노드에서 왔고 API 응답 키라 유지 — 하류 계약이다.
-    suspicions: list[tuple]  # verify 소견 [(scene_id, 사유)] — 점수 낮은 건만
-    zero_dropped: list       # 0점 제외분 [(scene_id, 사유)] — 리포트 합류용
+    total: float             # 확정분 총 길이(초)
+    end_moved: list[str]     # 끝 이동 기록 (refine_end_bound)
+    start_moved: list[str]   # 시작 이동 기록 (refine_start_bound)
     status: str              # ok | empty
     # --- 재배선(2026-08-20) 추가 ---
     phrases: list[str]       # rephrase_query 검색어 (없으면 원 질의 하나)
     filters: list[str]       # rephrase_query 메타 필터 힌트 (태그·라벨)
-    clips: list[dict]        # 경계 확정 전/후 클립 전부 — fill_budget 이 여기서 고른다
-    scores: dict             # score_match 채점 {scene_id: {score, complete, reason}}
-    dropped: list[tuple]     # fill_budget 탈락 [(scene_id, 사유)] — 왜 빠졌나를 남긴다
+    clips: list[dict]        # 컷·보정 중인 클립 (finish 가 시간순으로 확정)
     trace: object            # Trace | None — 노드·LLM 입출력 수집기 (직렬화 대상 아님)

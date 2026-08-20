@@ -81,8 +81,8 @@ deploy/update.sh --force    # 강제 재기동
   검증 e2e: v200 "홈런 모음" budget 60 → 홈런 1클립 59초, FULL_CLIP_TAGS 통째 컷+대사꼬리.
 - **노드 개편 (2026-08-20)** — 위 Phase 기록의 노드명(retrieve·plan·cutrank·backfill·
   endfix·verify)은 **그 시점 이름**이다. 현재 그래프는 동사_목적어로 통일됐다:
-  `rephrase_query → retrieve_evidence → select_clips → set_bounds → refine_bounds
-  → score_match → drop_unmatched → fill_budget` (분기 `retry_select`·
+  `rephrase_query → retrieve_evidence → select_clips → refine_end_bound
+  → refine_start_bound → finish` (분기 `retry_select`·
   `end_empty`). 최신 흐름·노드표는 `.aidoc/compose-flow.md` §1.
   구현(LLM 사용 여부·임계값)은 이름에 넣지 않는다 — 단계가 LLM↔규칙 사이를 오간다.
   **노드명은 `GET /api/v1/compose/{job_id}` 의 `progress` 배열로 밖에 나간다.**

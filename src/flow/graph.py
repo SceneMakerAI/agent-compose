@@ -1,33 +1,28 @@
 """compose 그래프 — 질의 1건 → 편성.
 
-  rephrase_query ─► retrieve_evidence ─► select_clips ─► set_bounds
-     ─► refine_bounds ─► score_match ─► drop_unmatched ─► fill_budget ─► END
+  rephrase_query ─► retrieve_evidence ─► select_clips
+     ─► refine_end_bound ─► refine_start_bound ─► finish ─► END
                           ▲
      select_clips ◄── retry_select ◄──┤ (0건·재시도 여유)
                        end_empty ◄────┘ (0건·소진) ──► END
 
-노드 이름은 전부 **동사_목적어**이고, 그 노드가 무엇을 만들어 내는지를 가리킨다
-(2026-08-20 개편 — 구 expand·retrieve·plan·cut·bounds·verify·drop0·rank·select).
-구현을 이름에 넣지 않는다: 구 `drop0` 은 임계값이 바뀌면 거짓말이 되는 이름이었고,
-LLM 사용 여부도 이름에 박지 않는다 — 이 파이프라인에선 단계가 LLM↔규칙 사이를
-오간 전례가 있다(구 bounds 의 시작 판정이 set_bounds 규칙으로 내려온 것처럼).
+노드 이름은 전부 **동사_목적어**이고, 그 노드가 무엇을 만들어 내는지를 가리킨다.
 
-2026-08-20 재배선 — cutrank 를 해체했다:
-- **절단이 마지막**(fill_budget). 예전에는 경계 확정 전에 잘랐고 그 뒤 끝 보정이
-  끝을 늘려 예산 보장이 무효가 됐다 (실측: 900초 요청에 947~1018초).
-- **set_bounds 가 정하고 refine_bounds 가 다듬는다.** 시작·끝을 함께 보는 이유는
-  따로 물으면 서로를 모르기 때문이다 — 시작을 25초 옮기면 끝의 여유도 달라진다.
-- **score_match 가 값을 한다**. 예전에는 소견 전용이라 출력물을 바꾸는 경로가 아예
-  없었다. 이제 클립별 일치도(0~3)를 매기고 fill_budget 이 그 점수를 쓴다. 기각권은
-  여전히 없다 — 필수층(득점·역전·동점·끝내기·경기 종료)은 0점이어도 유지한다.
+2026-08-20 재설계 — 경계만 남기고 걷어냈다:
+- **선곡이 곧 편성이다.** 채점(score_match)·0점 제외(drop_unmatched)·예산 절단
+  (fill_budget)·필수 회수를 폐기했다. 채점은 후보 90% 이상에 일치도 3 을 주어 변별이
+  없었고, 예산 절단과 회수는 질의를 규칙이 덮어쓰는 통로였다.
+- **끝과 시작을 다른 노드로 나눈다.** 끝은 모든 클립이 묻고(코드가 답할 수 없다),
+  시작은 투구 앵커를 못 찾은 클립만 묻는다(앵커가 있으면 코드의 답이 정답이다).
+  둘 다 클립당 1콜을 동시에 보낸다.
+- 컷 계산(앵커·레시피)은 노드가 아니라 refine_end_bound 안의 순수 계산으로 남는다.
 - **rephrase_query** 가 질의를 중계의 언어로 옮긴다 (실측: 추상 질의 최고 유사도
   0.58 vs 구체 질의 0.66~0.78).
 
 완화 사다리:
-  L1   투구 앵커 없는 클립 → 통째 폴백 (set_bounds 내장)
-  L2   선곡 검산 후 0건 → retry_select → select_clips 재선곡 (MAX_REPLAN 회)
-  L2.5 전 클립이 예산 초과 → 최단 1건 구제 (select.rescue_longest)
-  L3   그래도 0건 → status=empty
+  L1 투구 앵커 없는 클립 → 통째 폴백 (cut 내장) + refine_start_bound 가 시작을 되찾는다
+  L2 선곡 검산 후 0건 → retry_select → select_clips 재선곡 (MAX_REPLAN 회)
+  L3 그래도 0건 → status=empty
 
 retrieve_evidence 실패는 전파 — bench4 의 fail-open 폐기 (design.md §2).
 그래프는 무상태 배선이라 프로세스당 1회 컴파일.
@@ -40,7 +35,6 @@ from langgraph.graph import END, START, StateGraph
 
 from flow import bounds as bounds_mod
 from flow import cut, plan, prompts, rank, vocab
-from flow import select as select_mod
 from flow.llm import ChatLLM
 from flow.state import ComposeState, Inventory
 from log import get_logger
@@ -63,7 +57,6 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
     # Settings 필드명(use_expand 등)은 .env 계약이라 유지 — 지역 변수만 노드명에 맞춘다.
     use_rephrase = getattr(settings, "use_expand", True)
     use_refine = getattr(settings, "use_bounds", True)
-    use_fill = getattr(settings, "use_select", True)
 
     async def rephrase_query_node(st: ComposeState) -> dict:
         """질의 → 중계 문장형 검색어 + 메타 필터 힌트. 실패하면 원 질의로 폴백."""
@@ -106,11 +99,11 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         return {"evidence": ev, "evidence_orphan": orphan}
 
     async def select_clips_node(st: ComposeState) -> dict:
-        """선곡 — 모델은 **번호만** 답한다. 명세(예산·대상)는 코드가 정한다.
+        """선곡 — 모델은 **번호만** 답한다. 그 선곡이 곧 편성이다.
 
-        예산을 모델에게 맡기던 배선을 걷었다 (2026-08-20): 몇 초를 담을지는 fill_budget
-        이 산술로 정하고, 대상 어휘는 rephrase_query 가 이미 질의에서 뽑아 둔 필터를
-        쓴다. 모델에게 남긴 판단은 "이 경기에서 질의에 맞는 장면이 어느 것인가" 하나다.
+        예산·채점·절단을 전부 걷어냈으므로(2026-08-20) 여기서 고른 장면이 그대로
+        결과가 된다. 대상 어휘(targets)는 rephrase_query 가 질의에서 뽑아 둔 필터를
+        옮겨 담을 뿐이고, 모델에게 남긴 판단은 "질의에 맞는 장면이 어느 것인가" 하나다.
         """
         inv = st["inv"]
         # 인벤토리는 요청당 1회 렌더가 원칙이나, 증거를 장면 블록에 병합하려면
@@ -127,7 +120,6 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             # 대상 어휘는 rephrase_query 의 메타 필터 — 필수 장면 회수 범위를 가른다.
             "targets": list(st.get("filters") or []),
             "view": "전체",
-            "budget": st.get("budget") or plan.DEFAULT_BUDGET_SEC,
             "picked": plan.parse_picked(text, list(inv.scenes)),
             "raw": text,
         }
@@ -136,55 +128,36 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             tr.node("select_clips", spec={k: v for k, v in spec.items() if k != "raw"})
         return {"spec": spec, "attempt": st.get("attempt", 0) + 1}
 
-    async def set_bounds_node(st: ComposeState) -> dict:
-        """구간 확정 — 순위도 절단도 하지 않는다 (구 cutrank 의 1/3).
+    def _cut_clips(st: ComposeState) -> list[dict]:
+        """선곡 → 컷 좌표가 붙은 클립 (순수 계산 — 노드로 두지 않는다).
 
-        선곡분에 **회수 대상 필수 장면을 합쳐서** 컷한다. fill_budget 의 필수층이
-        일하려면 그 장면이 후보에 있어야 하는데, select_clips 가 놓치면 영영 들어올 수
-        없기 때문이다 (구 backfill 이 하던 회수를 여기서 보장한다). 무엇을 회수하는지는
-        select.recover_must 가 정한다 — pinpoint 는 회수하지 않고, 그 외에도 질의
-        대상과 겹치는 라벨만 끌어온다(질의를 회수가 덮어쓰지 않게).
-        구간 계산은 순수 함수라 몇 건 늘어도 비용이 없고, LLM 을 타는
-        refine_bounds·score_match 의 입력만 그만큼 커진다.
+        시작은 투구 앵커, 끝은 태그 레시피가 1차로 정한다. 이 계산이 없으면 모든
+        클립이 장면 통째가 되는데(v1003 장면10 은 그렇게 116초), 두 보정 노드는 끝을
+        늘리기만 하므로 되돌릴 방법이 없다.
         """
         inv = st["inv"]
-        picked = list(st["spec"]["picked"])
-        must = select_mod.recover_must(list(inv.scenes), picked, st["spec"])
-        if must:
-            log.info("set_bounds: 필수 장면 회수 %s (select_clips 미선곡)", must)
-        clips = rank.order(list(inv.scenes), picked + must)
+        clips = rank.order(list(inv.scenes), list(st["spec"]["picked"]))
         for r in clips:
             r["cut"] = cut.clip(r, list(inv.segs), inv.utts)
-        if tr := st.get("trace"):
-            tr.node("set_bounds",
-                    clips=[(r["scene_id"], round(r["cut"]["cs"]), round(r["cut"]["ce"]))
-                           for r in clips])
-        return {"clips": clips}
+        return clips
 
-    def route(st: ComposeState) -> str:
-        if st.get("clips"):
-            return "refine_bounds"
-        return "retry_select" if st["attempt"] <= vocab.MAX_REPLAN else "end_empty"
+    async def refine_end_bound_node(st: ComposeState) -> dict:
+        """끝 확정 — **모든 클립**이 대상. 클립 1건 = 콜 1건으로 펼쳐 동시에 보낸다.
 
-    def retry_select_node(st: ComposeState) -> dict:
-        return {"feedback": (f"선곡 {st['spec']['picked']}이 검산에서 비었다. "
-                             f"질의를 어휘로 다시 번역해 골라라.")}
+        "결과를 설명하는 해설이 어디서 끝나는가"는 코드가 답할 수 없다. 레시피 체인은
+        샷 오분류 하나로 결과 전에 끊기고(v203 도루: '주루' 샷이 없어 실물이 잘림),
+        규칙으로 남은 건 발화 꼬리 스냅(9초 상한)뿐이었다.
 
-    async def refine_bounds_node(st: ComposeState) -> dict:
-        """시작·끝을 함께 정한다. 후보는 결정적으로 만들고 LLM 은 고르기만 한다.
-
-        **클립 1건 = 콜 1건으로 펼쳐 동시에 보낸다.** 한 콜에 몰면 전송이 직렬이라
-        GPU 가 놀았다 (실측 v201: 24클립 10분 26초 동안 서버는 내내 Running 1 ·
-        KV 3%). 경계 판정은 클립끼리 독립이라 나눠도 근거가 줄지 않고, 응답을
-        **자기 행에만** 대조하므로 한 콜의 헛번호가 남의 클립을 못 건드린다.
+        한 콜에 몰면 전송이 직렬이라 GPU 가 논다 (실측 v201: 24클립 10분 26초 동안
+        서버는 내내 Running 1 · KV 3%). 판정은 클립끼리 독립이고, 응답을 **자기 행에만**
+        대조하므로 한 콜의 헛번호가 남의 클립을 못 건드린다.
         """
         inv = st["inv"]
-        clips = [dict(r, cut=dict(r["cut"])) for r in st["clips"]]     # 복사 후 수정
-        if not use_refine:
+        clips = [dict(r, cut=dict(r["cut"])) for r in _cut_clips(st)]   # 복사 후 수정
+        if not use_refine or not clips:
             return {"clips": clips}
-        rows = bounds_mod.build_rows(clips, list(inv.segs), inv.utts, list(inv.pitches))
-        log.info("refine_bounds 대상 %d/%d클립 — 나머지는 투구 앵커가 있어 set_bounds 경계 그대로",
-                 len(rows), len(clips))
+        rows = bounds_mod.end_rows(clips, list(inv.segs), inv.utts)
+        log.info("refine_end_bound 대상 %d/%d클립", len(rows), len(clips))
         if not rows:
             return {"clips": clips}
 
@@ -192,106 +165,75 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             """행 1건 질의 — 실패는 그 클립만 원 경계 유지 (배치 전체를 죽이지 않는다)."""
             try:
                 return await llm.chat(
-                    prompts.BOUNDS_SYSTEM, prompts.bounds_user([row]), thinking=True,
-                    trace=st.get("trace"), name=f"refine_bounds[{row['scene_id']}]")
+                    prompts.END_SYSTEM, prompts.end_user([row]), thinking=True,
+                    trace=st.get("trace"), name=f"refine_end_bound[{row['scene_id']}]")
             except Exception as e:                   # noqa: BLE001 — 건별 격리
-                log.warning("refine_bounds 실패(장면%d 경계 유지): %s", row["scene_id"], e)
+                log.warning("refine_end_bound 실패(장면%d 경계 유지): %s", row["scene_id"], e)
                 return ""
 
         texts = await asyncio.gather(*(one(r) for r in rows))
         moved: list[str] = []
         for row, text in zip(rows, texts):
-            moved += bounds_mod.apply(clips, [row], text)
-        if moved:
-            log.info("refine_bounds: %d콜 동시 · 경계 이동 %s", len(rows), moved)
+            moved += bounds_mod.apply_end(clips, [row], text)
+        log.info("refine_end_bound: %d콜 동시 · 끝 이동 %s", len(rows), moved or "없음")
         if tr := st.get("trace"):
-            tr.node("refine_bounds", asked=len(rows), moved=moved)
-        return {"clips": clips, "endfix_moved": moved}
+            tr.node("refine_end_bound", asked=len(rows), moved=moved)
+        return {"clips": clips, "end_moved": moved}
 
-    async def score_match_node(st: ComposeState) -> dict:
-        """클립별 채점 — 기각권은 없다. fill_budget 이 자를 때 이 점수를 쓴다.
+    async def refine_start_bound_node(st: ComposeState) -> dict:
+        """시작 확정 — **투구 앵커를 못 찾은 클립만**. 역시 클립당 1콜 동시.
 
-        refine_bounds 와 같은 이유로 **클립당 1콜을 동시에** 보낸다. 채점 기준은 클립 자신과
-        명세뿐이라 다른 클립을 볼 이유가 없었다.
-
-        실패를 삼킨다: 이 콜 하나가 이미 확정된 클립을 통째로 날리던 문제(audit 5-1).
-        이제 격리 단위가 클립이라 한 건이 실패해도 나머지 채점은 남는다 (점수 없는
-        클립은 fill_budget 이 DEFAULT_SCORE 로 중립 처리).
+        앵커가 잡히면 cut 이 정한 시작이 이미 그 플레이의 투구 샷이라 물을 이유가 없다.
+        앵커가 없는 클립은 장면 시작을 그대로 쓰는데, 전이 원장의 시각이 투구가 아니라
+        관측 시점에 찍히면 그 시작이 이미 플레이 도중이다 — v203 장면5(홈런)는
+        "담장 넘어갑니다"부터 시작해 스윙이 없었다.
         """
-        clips = st["clips"]
-        spec_line = plan.spec_line(st["spec"])
+        inv = st["inv"]
+        clips = [dict(r, cut=dict(r["cut"])) for r in st["clips"]]
+        if not use_refine or not clips:
+            return {"clips": clips}
+        rows = bounds_mod.start_rows(clips, list(inv.segs), inv.utts, list(inv.pitches))
+        log.info("refine_start_bound 대상 %d/%d클립 — 나머지는 투구 앵커가 있어 cut 시작 그대로",
+                 len(rows), len(clips))
+        if not rows:
+            return {"clips": clips, "status": "ok"}
 
-        async def one(c: dict) -> dict:
+        async def one(row: dict) -> str:
             try:
-                text = await llm.chat(
-                    prompts.VERIFY_SYSTEM,
-                    prompts.verify_user(st["query"], spec_line, _packet(st["inv"], c)),
-                    thinking=True, trace=st.get("trace"),
-                    name=f"score_match[{c['scene_id']}]",
-                )
-                got = plan.parse_verify(text)
-                sid = c["scene_id"]
-                # 자기 장면 번호만 취한다 — 한 콜이 헛번호를 뱉어 남의 클립 점수를
-                # 덮는 경로를 막는다. 번호를 틀렸어도 답이 한 줄이면 이 클립 것이다.
-                if sid in got:
-                    return {sid: got[sid]}
-                return {sid: next(iter(got.values()))} if len(got) == 1 else {}
-            except Exception as e:                   # noqa: BLE001 — 소견이 편성을 죽이면 안 된다
-                log.warning("score_match 실패(장면%d 채점 없이 진행): %s", c["scene_id"], e)
-                return {}
+                return await llm.chat(
+                    prompts.START_SYSTEM, prompts.start_user([row]), thinking=True,
+                    trace=st.get("trace"), name=f"refine_start_bound[{row['scene_id']}]")
+            except Exception as e:                   # noqa: BLE001 — 건별 격리
+                log.warning("refine_start_bound 실패(장면%d 경계 유지): %s", row["scene_id"], e)
+                return ""
 
-        scores: dict[int, dict] = {}
-        for part in await asyncio.gather(*(one(c) for c in clips)):
-            scores.update(part)
-        log.info("score_match: %d콜 동시 · 채점 %d건", len(clips), len(scores))
-        broken = [i for i, v in scores.items() if not v["complete"]]
-        if broken:
-            log.warning("score_match 완결성 문제 %s — 시작 보정 신호(클립은 유지)", broken)
+        texts = await asyncio.gather(*(one(r) for r in rows))
+        moved: list[str] = []
+        for row, text in zip(rows, texts):
+            moved += bounds_mod.apply_start(clips, [row], text)
+        log.info("refine_start_bound: %d콜 동시 · 시작 이동 %s", len(rows), moved or "없음")
         if tr := st.get("trace"):
-            tr.node("score_match", scores=scores, incomplete=broken)
-        return {"scores": scores}
+            tr.node("refine_start_bound", asked=len(rows), moved=moved)
+        return {"clips": clips, "start_moved": moved}
 
-    def drop_unmatched_node(st: ComposeState) -> dict:
-        """score_match 0점 제외 — 순수 필터. 필수 장면은 예외(사실이 소견을 이긴다).
-
-        "무관한 클립으로 예산을 채우는" 경로를 fill_budget 이전에 끊는다.
-        """
-        scores = st.get("scores", {})
-        keep, cut_ = [], []
-        for c in st["clips"]:
-            zero = scores.get(c["scene_id"], {}).get("score", select_mod.DEFAULT_SCORE) <= \
-                select_mod.DROP_SCORE
-            (cut_ if zero and not select_mod.is_must(c) else keep).append(c)
-        if cut_:
-            log.info("0점 제외 %s", [c["scene_id"] for c in cut_])
+    def finish_node(st: ComposeState) -> dict:
+        """마감 — 시간순 정렬 후 확정. 절단도 채점도 없다(선곡이 곧 편성이다)."""
+        picked = sorted(st.get("clips") or [], key=lambda c: c["cut"]["cs"])
+        total = sum(c["cut"]["ce"] - c["cut"]["cs"] for c in picked)
+        log.info("finish: 클립 %d건 %.0fs", len(picked), total)
         if tr := st.get("trace"):
-            tr.node("drop_unmatched", kept=len(keep), zero=[c["scene_id"] for c in cut_])
-        return {"clips": keep, "zero_dropped": [(c["scene_id"], "질의와 무관(score_match 0점)")
-                                                for c in cut_]}
-        
-    
+            tr.node("finish", picked=[c["scene_id"] for c in picked], total=round(total, 1))
+        return {"picked": picked, "total": round(total, 1),
+                "status": "ok" if picked else "empty"}
 
-    def fill_budget_node(st: ComposeState) -> dict:
-        """예산 확정 — 층 순서로 채우고, 마지막이라 예산이 정확하다."""
-        spec = st["spec"]
-        clips, scores = st["clips"], st.get("scores", {})
-        if not use_fill:
-            picked, spare = _assemble(clips, spec["budget"])
-            total = sum(r["cut"]["ce"] - r["cut"]["cs"] for r in picked)
-            return {"picked": picked, "spare": spare, "total": int(total), "status": "ok"}
-        picked, dropped, total = select_mod.choose(clips, spec, scores)
-        if not picked:
-            picked = select_mod.rescue_longest(clips, spec["budget"])
-            total = int(sum(r["cut"]["ce"] - r["cut"]["cs"] for r in picked))
-        if tr := st.get("trace"):
-            tr.node("fill_budget", picked=[c["scene_id"] for c in picked], total=total,
-                    dropped=[(c["scene_id"], why) for c, why in dropped])
-        return {
-            "picked": picked, "total": total, "status": "ok" if picked else "empty",
-            "dropped": (st.get("zero_dropped") or [])
-                       + [(c["scene_id"], why) for c, why in dropped],
-            "suspicions": [(i, v["reason"]) for i, v in scores.items() if v["score"] <= 1],
-        }
+    def route(st: ComposeState) -> str:
+        if st["spec"]["picked"]:
+            return "refine_end_bound"
+        return "retry_select" if st["attempt"] <= vocab.MAX_REPLAN else "end_empty"
+
+    def retry_select_node(st: ComposeState) -> dict:
+        return {"feedback": (f"선곡 {st['spec']['picked']}이 검산에서 비었다. "
+                             f"질의를 어휘로 다시 번역해 골라라.")}
 
     def end_empty_node(st: ComposeState) -> dict:
         return {"picked": [], "status": "empty"}
@@ -300,25 +242,22 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
     g.add_node("rephrase_query", rephrase_query_node)
     g.add_node("retrieve_evidence", retrieve_evidence_node)
     g.add_node("select_clips", select_clips_node)
-    g.add_node("set_bounds", set_bounds_node)
     g.add_node("retry_select", retry_select_node)
-    g.add_node("refine_bounds", refine_bounds_node)
-    g.add_node("score_match", score_match_node)
-    g.add_node("drop_unmatched", drop_unmatched_node)
-    g.add_node("fill_budget", fill_budget_node)
+    g.add_node("refine_end_bound", refine_end_bound_node)
+    g.add_node("refine_start_bound", refine_start_bound_node)
+    g.add_node("finish", finish_node)
     g.add_node("end_empty", end_empty_node)
     g.add_edge(START, "rephrase_query")
     g.add_edge("rephrase_query", "retrieve_evidence")
     g.add_edge("retrieve_evidence", "select_clips")
-    g.add_edge("select_clips", "set_bounds")
     g.add_conditional_edges(
-        "set_bounds", route, {"retry_select": "retry_select",
-                              "refine_bounds": "refine_bounds", "end_empty": "end_empty"})
+        "select_clips", route, {"retry_select": "retry_select",
+                                "refine_end_bound": "refine_end_bound",
+                                "end_empty": "end_empty"})
     g.add_edge("retry_select", "select_clips")
-    g.add_edge("refine_bounds", "score_match")
-    g.add_edge("score_match", "drop_unmatched")
-    g.add_edge("drop_unmatched", "fill_budget")
-    g.add_edge("fill_budget", END)
+    g.add_edge("refine_end_bound", "refine_start_bound")
+    g.add_edge("refine_start_bound", "finish")
+    g.add_edge("finish", END)
     g.add_edge("end_empty", END)
     return g.compile()
 
@@ -339,9 +278,8 @@ def _dedup_hits(hits: list[dict]) -> list[dict]:
     return sorted(best.values(), key=lambda h: -h["distance"])
 
 
-async def run_compose(
-    graph, inv: Inventory, query: str, budget: int | None, on_node=None,
-    trace=None) -> ComposeState:
+async def run_compose(graph, inv: Inventory, query: str, on_node=None,
+                      trace=None) -> ComposeState:
     """그래프 1회 실행 — stream 으로 노드 순서를 로그에 남기고 델타를 누적한다.
 
     on_node(node_name): 노드 완료 콜백 — API 가 job 진행 표시에 쓴다 (폴링 응답의
@@ -350,7 +288,7 @@ async def run_compose(
     """
     state: ComposeState = {}
     async for step in graph.astream(
-            {"query": query, "budget": budget, "inv": inv, "trace": trace},
+            {"query": query, "inv": inv, "trace": trace},
             stream_mode="updates"):
         for node, upd in step.items():
             log.info(
@@ -365,10 +303,6 @@ async def run_compose(
                     await r
     return state
 
-
-# ──────────────────────────────────────────────────────
-# 순수 보조 (bench4 원문 이식)
-# ──────────────────────────────────────────────────────
 
 def _group_hits(hits: list[dict]) -> tuple[list[dict], list[dict]]:
     """검색 히트 → 장면 그룹(히트수→유사도 정렬 상위) + 장면밖 (bench4 vector.retrieve 후반)."""
@@ -392,72 +326,3 @@ def _group_hits(hits: list[dict]) -> tuple[list[dict], list[dict]]:
             g["snippets"].append(h["text"])
     ev = sorted(groups.values(), key=lambda g: (-g["hits"], -g["sim"]))[:EVIDENCE_SCENES_MAX]
     return ev, orphan[:ORPHAN_MAX]
-
-
-def _assemble(pool: list[dict], budget: int) -> tuple[list[dict], list[dict]]:
-    """cut 후 실제 길이 기준으로 예산에 채운다 — 초과분은 예비 풀.
-    채택분은 시간순 배치 (서사 = 시간순 v1)."""
-    picked, spare, total = [], [], 0
-    for r in pool:
-        d = r["cut"]["ce"] - r["cut"]["cs"]
-        if total + d <= budget:
-            picked.append(r)
-            total += d
-        else:
-            spare.append(r)
-    return sorted(picked, key=lambda r: r["cut"]["cs"]), spare
-
-
-# 패킷에 실을 샷 — 앞뒤를 나눠 잡는다. 앞에서 8개만 자르면 **마지막 샷이 사라지는데**
-# VERIFY_SYSTEM 이 "마지막 샷에 결과가 없으면 문제" 로 판정하라고 지시한다. 8샷 초과
-# 클립이 경기당 8~15건(최대 58샷)이라 전부 오판정 후보였다 (2026-08-20 사전 점검).
-SHOT_HEAD = 5         # 시작 판정용 — 첫 샷이 그 플레이인지 앞 플레이 잔상인지
-SHOT_TAIL = 3         # 끝 판정용 — 결과 화면이 있는지
-UTT_CLIP = 90         # 해설 1건 표기 길이
-
-
-def _packet(inv: Inventory, c: dict) -> str:
-    """클립 1건 → 검수 패킷. **시각 한 축**으로 전광판·화면·해설을 정렬한다.
-
-    예전에는 화면 유형을 화살표로 나열하고(`투구 → 타구·수비 → …`) 대사를 따로 이어
-    붙였다. 어느 해설이 어느 화면의 것인지 알 수 없어 "무슨 일이 일어났나"가 안 읽혔고,
-    유형명만으로는 첫 샷이 그 플레이인지 앞 플레이 잔상인지 갈리지 않았다
-    (v201 장면9: 첫 샷이 앞 타구의 "야수가 공을 쫓아 걷고 있다"인데 완결성 '정상').
-
-    구간은 **컷 좌표**로 잡는다 — 장면 전체로 넓히면 이웃 플레이가 섞인다.
-    """
-    cs, ce = c["cut"]["cs"], c["cut"]["ce"]
-    away = (c.get("score") or " ").split()[0] if c.get("score") else ""
-    head = (f"[클립] {c['scene_id']} · {c['scene_type']}"
-            f"({c['labels'] or '라벨없음'}) · {c['inning']} · {cs:.0f}~{ce:.0f}s "
-            f"({ce - cs:.0f}s)\n"
-            f"       {away} {c['score_before']} → {away} {c['score'].split()[1]}"
-            if c.get("score") else f"[클립] {c['scene_id']}")
-
-    lines = [head]
-    tr = [r for r in inv.trans if cs - 20 <= r["sec"] <= ce]
-    if tr:
-        lines.append("")
-        lines.append("  전광판")
-        for r in tr:
-            lines.append(
-                f"    {r['sec']}s  {r['outs']}사 {r['balls']}볼{r['strikes']}스 "
-                f"주자 {r['bases']}  {r['away_score']}-{r['home_score']}"
-                + (f"  ({r['hint']})" if r.get("hint") else ""))
-
-    shots = [s for s in inv.segs if s["s"] < ce and s["e"] > cs]
-    if shots:
-        lines.append("")
-        head, tail = shots[:SHOT_HEAD], shots[-SHOT_TAIL:]
-        skipped = len(shots) - len(head) - len(tail)
-        shown = head + tail if skipped > 0 else shots
-        for i, s in enumerate(shown):
-            if skipped > 0 and i == len(head):
-                lines.append(f"     … (중략 {skipped}샷)")
-            lines.append(f"  {s['s']:.0f}s [{s.get('shot_type') or '미분류'}]")
-            if s.get("summary"):
-                lines.append(f"     화면 {s['summary']}")
-            utt = next((x for us, ue, x in inv.utts if us < s["e"] and ue > s["s"]), "")
-            if utt:
-                lines.append(f'     해설 "{utt[:UTT_CLIP]}"')
-    return "\n".join(lines)

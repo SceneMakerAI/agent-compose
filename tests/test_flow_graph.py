@@ -50,75 +50,19 @@ PLAN_EMPTY = "모드: collection\n대상: 홈런\n관점: 전체\n예산: 60\n�
 VERIFY_OK = "장면 1: 3 정상 근거\n장면 2: 3 정상 근거"
 EXPAND_OK = "검색어: 안타, 적시타\n필터: 안타"
 DEFAULTS = {"rephrase_query": EXPAND_OK, "select_clips": PLAN_OK,
-            "refine_bounds": "", "score_match": VERIFY_OK}
+            "refine_end_bound": "", "refine_start_bound": ""}
 
 
 async def test_happy_path():
     g = build_graph(StubLLM(), StubEmb(), StubStore())
-    st = await run_compose(g, INV, "안타 모음", None)
+    st = await run_compose(g, INV, "안타 모음")
     assert st["status"] == "ok" and [r["scene_id"] for r in st["picked"]] == [1, 2]
 
 
 async def test_empty_after_replan():
     g = build_graph(StubLLM(select_clips=PLAN_EMPTY), StubEmb(), StubStore())
-    st = await run_compose(g, INV, "홈런 모음", None)
+    st = await run_compose(g, INV, "홈런 모음")
     assert st["status"] == "empty" and st["picked"] == []
-
-
-async def test_must_scene_recovered_when_select_clips_misses_it():
-    """select_clips 가 놓친 필수 장면을 회수한다 — 질의 대상에 걸린 라벨일 때만.
-
-    선곡분만 구간 계산하면 빠뜨린 장면은 영영 들어올 수 없어 fill_budget 의
-    필수층이 무의미해진다 (구 backfill 이 하던 회수).
-    """
-    scenes = (scene(1, 100, 130, pitch=102),
-              scene(2, 200, 240, tags="안타", labels="역전,적시타", delta=1, pitch=202))
-    inv = Inventory(v_id=999, scenes=scenes, segs=SEGS, utts=(),
-                    game_line="g")
-    plan_one = "모드: collection\n대상: 안타, 역전\n관점: 전체\n예산: 300\n선곡: 1\n사유: 2번 누락"
-    g = build_graph(StubLLM(select_clips=plan_one), StubEmb(), StubStore())
-    st = await run_compose(g, inv, "안타 모음", 300)
-    assert [r["scene_id"] for r in st["picked"]] == [1, 2]
-    assert all("cut" not in s for s in scenes)              # B4 인벤토리 불변
-
-
-async def test_pinpoint_does_not_recover():
-    """pinpoint 질의는 회수하지 않는다 — 콕 집어 달라는데 다른 장면을 끼우지 않는다.
-
-    v203 comp30 실측: "역전 장면만" 에 select_clips 는 역전 1건만 골랐는데 회수가
-    득점 7건을 끌어와 8클립이 됐다. 질의를 회수가 덮어쓰면 안 된다.
-    """
-    scenes = (scene(1, 100, 130, tags="안타", labels="역전", delta=1, pitch=102),
-              scene(2, 200, 240, tags="안타", labels="적시타", delta=2, pitch=202))
-    inv = Inventory(v_id=999, scenes=scenes, segs=SEGS, utts=(),
-                    game_line="g")
-    plan_one = "모드: pinpoint\n대상: 역전\n관점: 전체\n예산: 300\n선곡: 1\n사유: 역전만"
-    g = build_graph(StubLLM(select_clips=plan_one), StubEmb(), StubStore())
-    st = await run_compose(g, inv, "역전 장면만", 300)
-    assert [r["scene_id"] for r in st["picked"]] == [1]      # 2번(득점)은 끌려오지 않는다
-
-
-async def test_score_match_drives_drop_not_removal():
-    """0점은 빼되 필수 장면은 유지한다 — 사실이 소견을 이긴다."""
-    scenes = (scene(1, 100, 130, tags="범타"),
-              scene(2, 200, 240, tags="안타", labels="역전", delta=1, pitch=202))
-    inv = Inventory(v_id=999, scenes=scenes, segs=SEGS, utts=(),
-                    game_line="g")
-    plan_two = "모드: collection\n대상: 안타\n관점: 전체\n예산: 300\n선곡: 1, 2\n사유: t"
-    zero_both = "장면 1: 0 정상 무관\n장면 2: 0 정상 무관"
-    g = build_graph(StubLLM(select_clips=plan_two, score_match=zero_both), StubEmb(), StubStore())
-    st = await run_compose(g, inv, "안타 모음", 300)
-    ids = [r["scene_id"] for r in st["picked"]]
-    assert 2 in ids                                        # 필수(역전·득점) 는 0점이어도 유지
-    assert 1 not in ids                                    # 0점 일반 클립은 제외
-    assert any(sid == 1 for sid, _ in st["dropped"])
-
-
-async def test_budget_is_exact_after_refine_bounds():
-    """경계 보정이 끝난 뒤 자르므로 총 길이가 예산을 넘지 않는다."""
-    g = build_graph(StubLLM(), StubEmb(), StubStore())
-    st = await run_compose(g, INV, "안타 모음", 40)
-    assert st["total"] <= 40
 
 
 class CapturingLLM(StubLLM):
@@ -141,56 +85,36 @@ class CapturingLLM(StubLLM):
         return [n for _s, _u, n in self.calls if n.split("[")[0] == call]
 
 
-async def test_refine_bounds_and_score_match_fan_out_per_clip():
+async def test_bound_nodes_fan_out_per_clip():
     """클립마다 1콜씩 나가야 한다 — 한 콜에 몰면 전송이 직렬이라 GPU 가 논다.
 
     묶어 보내던 시절 v201 은 refine_bounds 10분 26초 · score_match 9분 8초를 쓰면서 서버는 내내
     Running 1 · KV 3% 였다 (실측 2026-08-20). 콜 수는 눈으로 안 보이니 여기서 고정한다.
     """
-    # refine_bounds 는 **투구 앵커가 없고** 현재 시작과 구별되는 후보가 있는 클립만
-    # 묻는다. 앵커가 잡히면 set_bounds 의 시작이 정답이라 아예 묻지 않으므로 pitch_sec 과
-    # '투구' 샷을 뺀다 (앵커 있는 경우는 test_build_rows_skips_clips_with_pitch_anchor).
-    # 후보는 cs **이후**여야 하고, 화면·해설이 현재와 달라야 살아남는다(_dedup).
+    # 시작은 **투구 앵커가 없는** 클립만 묻는다. 앵커가 잡히면 cut 의 시작이 정답이라
+    # 아예 묻지 않으므로 pitch_sec 과 '투구' 샷을 뺀다(앵커 있는 경우는
+    # test_start_rows_skips_clips_with_pitch_anchor). 끝은 모든 클립이 묻되 후보가
+    # 있어야 하므로 클립 끝 뒤에 발화 끝을 둔다.
     scenes = (scene(1, 100, 130), scene(2, 200, 240, tags="범타"))
     segs = tuple(dict(s, shot_type="타구·수비", summary=f"샷{s['seg_id']}") for s in SEGS)
     inv = Inventory(v_id=999, scenes=scenes, segs=segs,
                     utts=((108.0, 112.0, "던집니다"), (118.0, 124.0, "넘어갑니다"),
-                          (208.0, 212.0, "던집니다"), (212.0, 218.0, "잡아냅니다")),
+                          (131.0, 136.0, "정리됩니다"),
+                          (208.0, 212.0, "던집니다"), (212.0, 218.0, "잡아냅니다"),
+                          (241.0, 246.0, "마무리됩니다")),
                     game_line="g",
                     pitches=((110, 111), (210, 211)))
     llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), StubStore())
-    await run_compose(g, inv, "안타 모음", 300)
-    assert llm.names_of("refine_bounds") == ["refine_bounds[1]", "refine_bounds[2]"]
-    assert sorted(llm.names_of("score_match")) == ["score_match[1]", "score_match[2]"]
+    await run_compose(g, inv, "안타 모음")
+    # 끝은 모든 클립이, 시작은 앵커 없는 클립만 묻는다
+    assert sorted(llm.names_of("refine_end_bound")) == [
+        "refine_end_bound[1]", "refine_end_bound[2]"]
+    assert sorted(llm.names_of("refine_start_bound")) == [
+        "refine_start_bound[1]", "refine_start_bound[2]"]
     # 프롬프트에는 자기 클립만 실린다 (남의 장면이 섞이면 나눈 의미가 없다)
-    _sys, user = next((s, u) for s, u, n in llm.calls if n == "score_match[1]")
-    assert "[클립] 1 " in user and "[클립] 2 " not in user
-    assert "[질의] 안타 모음" in user            # 질의가 실려야 채점 기준이 선다
-
-
-async def test_caller_budget_reaches_spec():
-    """호출자 예산이 spec 에 그대로 실린다.
-
-    예산은 더 이상 프롬프트로 가지 않는다 (2026-08-20) — 모델이 "예산: 180"으로
-    답하며 그 전제로 선곡하던 배선을 걷었다. 지금 지켜야 하는 건 fill_budget 이
-    쓰는 값이 호출자 값과 같은가다.
-    """
-    llm = CapturingLLM()
-    g = build_graph(llm, StubEmb(), StubStore())
-    st = await run_compose(g, INV, "안타 모음", 900)
-    assert st["spec"]["budget"] == 900
-    plan_system, user = llm.prompt_of("select_clips")
-    assert "900" not in plan_system and "예산" not in user   # 프롬프트엔 싣지 않는다
-
-
-async def test_budget_omitted_falls_back_to_default():
-    """예산 미지정이면 기본값이 spec 에 들어간다."""
-    from flow import plan as plan_mod
-
-    g = build_graph(StubLLM(), StubEmb(), StubStore())
-    st = await run_compose(g, INV, "안타 모음", None)
-    assert st["spec"]["budget"] == plan_mod.DEFAULT_BUDGET_SEC
+    _sys, user = next((s, u) for s, u, n in llm.calls if n == "refine_end_bound[1]")
+    assert "■ 장면 1 " in user and "■ 장면 2 " not in user
 
 
 async def test_evidence_is_merged_into_scene_block():
@@ -202,7 +126,7 @@ async def test_evidence_is_merged_into_scene_block():
 
     llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), EvStore())
-    await run_compose(g, INV, "호수비 모음", 300)
+    await run_compose(g, INV, "호수비 모음")
     _sys, user = llm.prompt_of("select_clips")
     block = user.split("[장면 1]")[1].split("[장면 2]")[0]
     assert "- 검색증거:" in block and "[화면] 외야수가 담장 앞에서 잡는다" in block

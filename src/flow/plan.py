@@ -11,9 +11,6 @@ from log import get_logger
 
 log = get_logger(__name__)
 
-DEFAULT_BUDGET_SEC = 180    # 질의·인자에 예산이 없을 때 (bench4 운영값)
-
-
 def render_situation(outs: int | None, bases: str | None) -> str:
     """전광판 아웃·주자 → '1사 1·2루' 표기. 값이 없으면 '?'.
 
@@ -110,8 +107,7 @@ def parse_picked(text: str, scenes: list[dict]) -> list[int]:
 
 def spec_line(spec: dict) -> str:
     """검수·리포트용 명세 한 줄."""
-    return (f"모드={spec['mode']} 관점={spec['view']} "
-            f"대상={','.join(spec['targets']) or '-'} 예산={spec['budget']}s")
+    return f"모드={spec['mode']} 관점={spec['view']} 대상={','.join(spec['targets']) or '-'}"
 
 
 
@@ -138,8 +134,7 @@ _SCORE_LINE = re.compile(r"장면\s*(\d+)\s*[:：]\s*([0-3])\s*(정상|문제)?\
 def parse_verify(text: str) -> dict[int, dict]:
     """score_match 응답 → {scene_id: {score, complete, reason}}.
 
-    기각권이 없으므로 '무엇을 뺄까'가 아니라 '얼마나 맞나'만 읽는다. 파싱 실패한 줄은
-    버린다 — 점수가 없는 클립은 fill_budget 이 기본값으로 다룬다(빠지지 않는다).
+    (2026-08-20 채점 노드 폐기 후 미사용 — 되살릴 때를 위해 파서만 남긴다.)
     """
     out: dict[int, dict] = {}
     for line in text.splitlines():

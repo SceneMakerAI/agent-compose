@@ -40,14 +40,11 @@ _JOBS: dict[str, dict] = {}     # job_id → {status, v_id, query, result?, erro
 _JOBS_MAX = 200                 # 오래된 완료 잡 정리 상한 (프로세스 수명 캐시)
 
 # 그래프 노드 → t_video 상태 코드 (UI 진행 표시 — 코드가 바뀌는 노드에서만 기록).
-# **국면 순서대로 단조 증가해야 한다.** 구 표는 select(예산 확정)를 CUT(4030)에 걸어
-# verify(4040) 다음에 4030 으로 되돌아갔다 — 화면 진행이 뒤로 가는 값이었다.
-# 재배선으로 채점이 예산 확정보다 앞서면서 생긴 어긋남이라, 확정을 뒤 국면에 붙인다.
+# **국면 순서대로 단조 증가해야 한다** — 화면 진행이 뒤로 가면 안 된다.
 _NODE_CODE = {"rephrase_query": COMPOSE_PLAN, "retrieve_evidence": COMPOSE_PLAN,
               "select_clips": COMPOSE_PLAN, "retry_select": COMPOSE_PLAN,
-              "set_bounds": COMPOSE_CUT, "refine_bounds": COMPOSE_CUT,
-              "score_match": COMPOSE_VERIFY, "drop_unmatched": COMPOSE_VERIFY,
-              "fill_budget": COMPOSE_VERIFY}
+              "refine_end_bound": COMPOSE_CUT, "refine_start_bound": COMPOSE_CUT,
+              "finish": COMPOSE_VERIFY}
 
 
 class ComposeRequest(BaseModel):
@@ -55,7 +52,6 @@ class ComposeRequest(BaseModel):
 
     v_id: int
     query: str
-    budget: int | None = None    # 초 — 명시 시 질의 해석보다 우선
     render: bool = False         # 원샷 옵션 — 편성 ok 면 이어서 mp4 렌더까지 (동기)
     bumper: bool = True          # render=True 일 때만 — 이닝 그룹 사이 범퍼
 
@@ -148,13 +144,12 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
             last_code = code
             await st.status.set(req.v_id, code)
 
-    state = await run_compose(st.graph, inv, req.query, req.budget, on_node=on_node, trace=tr)
+    state = await run_compose(st.graph, inv, req.query, on_node=on_node, trace=tr)
 
     clips = [_clip_row(r) for r in state.get("picked", [])]
     comp_id = await st.compose_repo.save(
         req.v_id, req.query, state.get("spec"), state["status"], clips)
-    tr.finish(comp_id, state["status"], clips=len(clips), total=state.get("total"),
-              dropped=state.get("dropped", []))
+    tr.finish(comp_id, state["status"], clips=len(clips), total=state.get("total"))
 
     render_result = None
     stamp_error = None
@@ -184,9 +179,8 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
         "spec": {k: v for k, v in (state.get("spec") or {}).items() if k != "raw"},
         "clips": clips,
         "duration": round(sum(c["end"] - c["start"] for c in clips), 1),
-        "suspicions": state.get("suspicions", []),
-        "endfix_moved": state.get("endfix_moved", []),
-        "dropped": state.get("dropped", []),
+        "end_moved": state.get("end_moved", []),
+        "start_moved": state.get("start_moved", []),
         "orphans": [{"s": o["s"], "text": o["text"][:80]}
                     for o in state.get("evidence_orphan", [])],
         "status": state["status"],
