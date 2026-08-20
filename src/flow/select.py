@@ -1,6 +1,6 @@
-"""select — 예산 확정 (순수 계산, LLM 무관). 경계가 다 정해진 **뒤에** 자른다.
+"""fill_budget 노드의 본체 — select — 예산 확정 (순수 계산, LLM 무관). 경계가 다 정해진 **뒤에** 자른다.
 
-왜 마지막인가: 예전에는 cutrank 가 경계 확정 전에 예산을 잘랐고, 그 뒤 endfix 가 클립
+왜 마지막인가: 예전에는 cutrank 가 경계 확정 전에 예산을 잘랐고, 그 뒤 끝 보정이 클립
 끝을 최대 12초씩 늘려 예산 보장이 그 자리에서 무효가 됐다 (실측: 900초 요청에
 947·949·964·977·1005·1018초).
 
@@ -10,7 +10,7 @@
 층으로 강제한다.
 
 층 순서 (2026-08-20 재편 — 넷에서 둘로):
-  ① 필수   득점 장면 + 결정 라벨 — verify 가 0점을 줘도 유지한다(사실이 소견을 이긴다)
+  ① 필수   득점 장면 + 결정 라벨 — score_match 가 0점을 줘도 유지한다(사실이 소견을 이긴다)
   ② 나머지 rank 노드가 준 **LLM 우선순위** 순서대로. 순서가 없으면 점수순 폴백.
 
 구 ②질의·③커버·④잔여는 폐기했다. 층 순서와 규칙이 코드에 고정돼 있어
@@ -32,7 +32,7 @@ log = get_logger(__name__)
 
 # 사실이 보증하는 장면 — 이 라벨이 붙으면 필수층이다.
 MUST_LABELS = frozenset({"역전", "동점", "끝내기", "경기 종료"})
-# verify 가 이 점수를 주면 필수층이 아닌 한 넣지 않는다 — 무관한 클립으로 예산을
+# score_match 가 이 점수를 주면 필수층이 아닌 한 넣지 않는다 — 무관한 클립으로 예산을
 # 채우는 건 채운 게 아니라 희석하는 것이다.
 DROP_SCORE = 0
 # 점수가 없는 클립(파싱 실패·verify 미실행)의 기본값 — 중립.
@@ -80,7 +80,7 @@ def choose(clips: list[dict], spec: dict, scores: dict[int, dict],
     Args:
         clips: 경계가 확정된 클립 전부 (cut 포함). spec: plan 명세.
         scores: verify 채점 {scene_id: {score, complete, reason}} — 없으면 빈 dict.
-        order: rank 가 준 scene_id 순서. None 이면 점수순 폴백.
+        order: order_clips 가 준 scene_id 순서. None 이면 점수순 폴백.
     Returns:
         tuple: (채택, 탈락[(clip, 사유)], 총 길이 초)
     """
@@ -128,7 +128,7 @@ def choose(clips: list[dict], spec: dict, scores: dict[int, dict],
                  "품질 우선이라 그대로 담는다",
                  total, budget, must_cap, len(must), len(picked))
 
-    # ② 나머지 — rank 가 준 순서대로. 순서가 없으면(콜 실패·미실행) 점수순 폴백.
+    # ② 나머지 — order_clips 가 준 순서대로. 순서가 없으면(콜 실패·미실행) 점수순 폴백.
     rest = [c for c in clips if c["scene_id"] not in taken]
     if order:
         pos = {sid: i for i, sid in enumerate(order)}

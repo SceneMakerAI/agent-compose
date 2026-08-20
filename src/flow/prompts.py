@@ -1,6 +1,6 @@
 """compose 프롬프트 — 수정이 잦은 문구는 전부 이 파일에 (bench4 compose/prompt.py 이식).
 
-LLM 은 세 곳: plan(질의 해석+선곡) / endfix(끝 보정) / verify(부합 검수).
+LLM 은 다섯 곳: rephrase_query · select_clips · refine_bounds · score_match · order_clips.
 출력은 JSON 금지 — 줄 단위 키: 값 형식 (Qwen 파싱 안정성 실측 관례).
 
 bench4 와 다른 점:
@@ -11,7 +11,7 @@ bench4 와 다른 점:
 
 from flow import vocab
 
-# 어휘 — plan 이 아는 말의 전부 (판별불가는 발행에 없으므로 제외).
+# 어휘 — select_clips 가 아는 말의 전부 (판별불가는 발행에 없으므로 제외).
 # 하드코딩하면 vision3 에 태그가 늘어도 프롬프트만 옛 어휘로 남는다 (보크 실측).
 TAG_VOCAB = ", ".join(t for t in vocab.PLAY_TAGS if t != "판별불가")
 LABEL_VOCAB = ", ".join(vocab.LABELS)

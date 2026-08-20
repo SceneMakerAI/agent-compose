@@ -7,8 +7,8 @@ from flow.state import Inventory
 class StubLLM:
     """콜 이름별 응답 스텁 — 노드가 늘어도 순서에 의존하지 않는다.
 
-    bounds·verify 는 클립당 1콜이라 이름이 "verify[2]" 처럼 붙는다 — 대괄호를 떼고
-    찾는다 (안 떼면 스텁이 조용히 빗나가 기본값으로 흘러 테스트가 거짓 통과한다).
+    refine_bounds·score_match 는 클립당 1콜이라 이름이 "score_match[2]" 처럼 붙는다 —
+    대괄호를 떼고 찾는다 (안 떼면 스텁이 조용히 빗나가 기본값으로 흘러 테스트가 거짓 통과한다).
     """
 
     def __init__(self, by_name: dict | None = None, **kw):
@@ -49,7 +49,8 @@ PLAN_OK = "모드: collection\n대상: 안타\n관점: 전체\n예산: 60\n선�
 PLAN_EMPTY = "모드: collection\n대상: 홈런\n관점: 전체\n예산: 60\n선곡: 없음\n사유: 없음"
 VERIFY_OK = "장면 1: 3 정상 근거\n장면 2: 3 정상 근거"
 EXPAND_OK = "검색어: 안타, 적시타\n필터: 안타"
-DEFAULTS = {"expand": EXPAND_OK, "plan": PLAN_OK, "bounds": "", "verify": VERIFY_OK}
+DEFAULTS = {"rephrase_query": EXPAND_OK, "select_clips": PLAN_OK,
+            "refine_bounds": "", "score_match": VERIFY_OK}
 
 
 async def test_happy_path():
@@ -59,29 +60,29 @@ async def test_happy_path():
 
 
 async def test_empty_after_replan():
-    g = build_graph(StubLLM(plan=PLAN_EMPTY), StubEmb(), StubStore())
+    g = build_graph(StubLLM(select_clips=PLAN_EMPTY), StubEmb(), StubStore())
     st = await run_compose(g, INV, "홈런 모음", None)
     assert st["status"] == "empty" and st["picked"] == []
 
 
-async def test_must_scene_recovered_when_plan_misses_it():
-    """plan 이 놓친 득점 장면을 필수층이 회수한다.
+async def test_must_scene_recovered_when_select_clips_misses_it():
+    """select_clips 가 놓친 득점 장면을 필수층이 회수한다.
 
-    선곡분만 컷하면 plan 이 빠뜨린 장면은 영영 들어올 수 없어 select 의 필수층이
-    무의미해진다 (구 backfill 이 하던 회수).
+    선곡분만 구간 계산하면 빠뜨린 장면은 영영 들어올 수 없어 fill_budget 의
+    필수층이 무의미해진다 (구 backfill 이 하던 회수).
     """
     scenes = (scene(1, 100, 130, pitch=102),
               scene(2, 200, 240, tags="안타", labels="역전,적시타", delta=1, pitch=202))
     inv = Inventory(v_id=999, scenes=scenes, segs=SEGS, utts=(),
                     game_line="g", inventory_text="(목록)")
     plan_one = "모드: collection\n대상: 안타\n관점: 전체\n예산: 300\n선곡: 1\n사유: 2번 누락"
-    g = build_graph(StubLLM(plan=plan_one), StubEmb(), StubStore())
+    g = build_graph(StubLLM(select_clips=plan_one), StubEmb(), StubStore())
     st = await run_compose(g, inv, "안타 모음", 300)
     assert [r["scene_id"] for r in st["picked"]] == [1, 2]
     assert all("cut" not in s for s in scenes)              # B4 인벤토리 불변
 
 
-async def test_verify_score_drives_drop_not_removal():
+async def test_score_match_drives_drop_not_removal():
     """0점은 빼되 필수 장면은 유지한다 — 사실이 소견을 이긴다."""
     scenes = (scene(1, 100, 130, tags="범타"),
               scene(2, 200, 240, tags="안타", labels="역전", delta=1, pitch=202))
@@ -89,7 +90,7 @@ async def test_verify_score_drives_drop_not_removal():
                     game_line="g", inventory_text="(목록)")
     plan_two = "모드: collection\n대상: 안타\n관점: 전체\n예산: 300\n선곡: 1, 2\n사유: t"
     zero_both = "장면 1: 0 정상 무관\n장면 2: 0 정상 무관"
-    g = build_graph(StubLLM(plan=plan_two, verify=zero_both), StubEmb(), StubStore())
+    g = build_graph(StubLLM(select_clips=plan_two, score_match=zero_both), StubEmb(), StubStore())
     st = await run_compose(g, inv, "안타 모음", 300)
     ids = [r["scene_id"] for r in st["picked"]]
     assert 2 in ids                                        # 필수(역전·득점) 는 0점이어도 유지
@@ -97,7 +98,7 @@ async def test_verify_score_drives_drop_not_removal():
     assert any(sid == 1 for sid, _ in st["dropped"])
 
 
-async def test_budget_is_exact_after_bounds():
+async def test_budget_is_exact_after_refine_bounds():
     """경계 보정이 끝난 뒤 자르므로 총 길이가 예산을 넘지 않는다."""
     g = build_graph(StubLLM(), StubEmb(), StubStore())
     st = await run_compose(g, INV, "안타 모음", 40)
@@ -124,14 +125,14 @@ class CapturingLLM(StubLLM):
         return [n for _s, _u, n in self.calls if n.split("[")[0] == call]
 
 
-async def test_bounds_and_verify_fan_out_per_clip():
+async def test_refine_bounds_and_score_match_fan_out_per_clip():
     """클립마다 1콜씩 나가야 한다 — 한 콜에 몰면 전송이 직렬이라 GPU 가 논다.
 
-    묶어 보내던 시절 v201 은 bounds 10분 26초 · verify 9분 8초를 쓰면서 서버는 내내
+    묶어 보내던 시절 v201 은 refine_bounds 10분 26초 · score_match 9분 8초를 쓰면서 서버는 내내
     Running 1 · KV 3% 였다 (실측 2026-08-20). 콜 수는 눈으로 안 보이니 여기서 고정한다.
     """
-    # bounds 는 **투구 앵커가 없고** 현재 시작과 구별되는 후보가 있는 클립만 묻는다.
-    # 앵커가 잡히면 cut 의 시작이 정답이라 아예 묻지 않으므로 픽스처에서 pitch_sec 과
+    # refine_bounds 는 **투구 앵커가 없고** 현재 시작과 구별되는 후보가 있는 클립만
+    # 묻는다. 앵커가 잡히면 set_bounds 의 시작이 정답이라 아예 묻지 않으므로 pitch_sec 과
     # '투구' 샷을 뺀다 (앵커 있는 경우는 test_build_rows_skips_clips_with_pitch_anchor).
     # 후보는 cs **이후**여야 하고, 화면·해설이 현재와 달라야 살아남는다(_dedup).
     scenes = (scene(1, 100, 130), scene(2, 200, 240, tags="범타"))
@@ -144,16 +145,16 @@ async def test_bounds_and_verify_fan_out_per_clip():
     llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), StubStore())
     await run_compose(g, inv, "안타 모음", 300)
-    assert llm.names_of("bounds") == ["bounds[1]", "bounds[2]"]
-    assert sorted(llm.names_of("verify")) == ["verify[1]", "verify[2]"]
+    assert llm.names_of("refine_bounds") == ["refine_bounds[1]", "refine_bounds[2]"]
+    assert sorted(llm.names_of("score_match")) == ["score_match[1]", "score_match[2]"]
     # 프롬프트에는 자기 클립만 실린다 (남의 장면이 섞이면 나눈 의미가 없다)
-    _sys, user = next((s, u) for s, u, n in llm.calls if n == "verify[1]")
+    _sys, user = next((s, u) for s, u, n in llm.calls if n == "score_match[1]")
     assert "[클립] 1 " in user and "[클립] 2 " not in user
     assert "[질의] 안타 모음" in user            # 질의가 실려야 채점 기준이 선다
 
 
-async def test_caller_budget_reaches_plan_prompt():
-    """호출자 예산이 plan 프롬프트에 실제로 실린다.
+async def test_caller_budget_reaches_select_clips_prompt():
+    """호출자 예산이 select_clips 프롬프트에 실제로 실린다.
 
     기본값(180)만 보내던 배선 탓에 900s 요청에도 모델이 "예산: 180"으로 답하며 그
     전제로 선곡했다 (2026-08-19 실측). 프롬프트 문자열까지 확인해야 잡히는 종류라
@@ -162,7 +163,7 @@ async def test_caller_budget_reaches_plan_prompt():
     llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), StubStore())
     await run_compose(g, INV, "안타 모음", 900)
-    plan_system, _ = llm.prompt_of("plan")
+    plan_system, _ = llm.prompt_of("select_clips")
     assert "900" in plan_system
     assert "{budget}" not in plan_system            # 치환 누락 방지
     assert str(180) not in plan_system.split("예산(초)이")[1][:80]   # 기본값 잔존 금지
@@ -175,7 +176,7 @@ async def test_budget_omitted_falls_back_to_default():
     llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), StubStore())
     await run_compose(g, INV, "안타 모음", None)
-    assert str(plan_mod.DEFAULT_BUDGET_SEC) in llm.prompt_of("plan")[0]
+    assert str(plan_mod.DEFAULT_BUDGET_SEC) in llm.prompt_of("select_clips")[0]
 
 
 # ── 인벤토리 상황 렌더 ─────────────────────────────────

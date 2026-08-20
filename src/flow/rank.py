@@ -1,10 +1,10 @@
-"""rank — 중요도 계산·정렬 (순수 계산, LLM 무관 — bench4 compose/rank.py 이식).
+"""order_clips 의 폴백 정렬 + 인벤토리 복사 — rank — 중요도 계산·정렬 (순수 계산, LLM 무관 — bench4 compose/rank.py 이식).
 
-예산 절단은 여기서 하지 않는다 — cut 이 클립을 줄인 뒤 assemble 이 실제 EDL
+예산 절단은 여기서 하지 않는다 — set_bounds 가 클립을 줄인 뒤 assemble 이 실제 EDL
 길이로 채택/충원한다 (미리 자르면 예산 미달). 여기서는 순서와 예비 풀만 만든다.
 
 bench4 와 다른 점 (B4 불변화): order 가 **행 복사본**을 돌려준다 — 원본 인벤토리
-dict 를 하류(cutrank·endfix)가 절대 건드리지 않게 하는 서비스 동시성 전제.
+dict 를 하류 노드가 절대 건드리지 않게 하는 서비스 동시성 전제.
 """
 
 from flow import vocab

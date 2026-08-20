@@ -1,6 +1,6 @@
 """편성(compose) 라우트 — 질의 1건 → LangGraph flow → t_compose 저장 + 결과.
 
-plan(thinking)이 1~3분이라 202 + job 폴링 패턴 (단일 워커 전제 — ingest 와 동일).
+select_clips(thinking)이 1~3분이라 202 + job 폴링 패턴 (단일 워커 전제 — ingest 와 동일).
 같은 v_id 동시 편성은 허용 — 읽기 전용 + comp_id 신규 발급이라 충돌이 없다.
 render=True 원샷: 편성 저장 후 ok 면 worker-render 까지 이어 호출 (기본 False —
 렌더 실패는 잡의 render 필드로만 드러나고 편성 성공을 뒤집지 않는다).
@@ -41,9 +41,10 @@ _JOBS: dict[str, dict] = {}     # job_id → {status, v_id, query, result?, erro
 _JOBS_MAX = 200                 # 오래된 완료 잡 정리 상한 (프로세스 수명 캐시)
 
 # 그래프 노드 → t_video 상태 코드 (UI 진행 표시 — 코드가 바뀌는 노드에서만 기록)
-_NODE_CODE = {"expand": COMPOSE_PLAN, "retrieve": COMPOSE_PLAN, "plan": COMPOSE_PLAN,
-              "feedback": COMPOSE_PLAN, "cut": COMPOSE_CUT, "bounds": COMPOSE_CUT,
-              "select": COMPOSE_CUT, "verify": COMPOSE_VERIFY}
+_NODE_CODE = {"rephrase_query": COMPOSE_PLAN, "retrieve_evidence": COMPOSE_PLAN,
+              "select_clips": COMPOSE_PLAN, "retry_select": COMPOSE_PLAN,
+              "set_bounds": COMPOSE_CUT, "refine_bounds": COMPOSE_CUT,
+              "fill_budget": COMPOSE_CUT, "score_match": COMPOSE_VERIFY}
 
 
 class ComposeRequest(BaseModel):
@@ -129,8 +130,8 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
         v_id=req.v_id, scenes=tuple(scenes), segs=tuple(segs), utts=utts,
         game_line=f"v_id={req.v_id}  {parts[0]}(원정) vs {parts[2]}(홈)",
         inventory_text=plan_mod.render_inventory(scenes),
-        pitches=tuple(await repo.fetch_pitch_windows(req.v_id)),  # bounds 시작 후보 재료
-        trans=tuple(await repo.fetch_transitions(req.v_id)),  # verify 사실 근거
+        pitches=tuple(await repo.fetch_pitch_windows(req.v_id)),  # refine_bounds 후보 재료
+        trans=tuple(await repo.fetch_transitions(req.v_id)),  # score_match 사실 근거
     )
     tr = Trace(st.settings.trace_dir, req.v_id, req.query)
 

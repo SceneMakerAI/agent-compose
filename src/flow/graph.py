@@ -1,36 +1,41 @@
 """compose 그래프 — 질의 1건 → 편성.
 
-  expand ─► retrieve ─► plan ─► cut ─► bounds ─► verify ─► select ─► END
-                         ▲               (경계)   (채점)   (예산확정)
-                         └── feedback ◄── (0건·재시도 여유)
-                                       └─► empty ──► END (0건·소진)
+  rephrase_query ─► retrieve_evidence ─► select_clips ─► set_bounds
+     ─► refine_bounds ─► score_match ─► drop_unmatched ─► order_clips
+     ─► fill_budget ─► END
+                          ▲
+     select_clips ◄── retry_select ◄──┤ (0건·재시도 여유)
+                       end_empty ◄────┘ (0건·소진) ──► END
+
+노드 이름은 전부 **동사_목적어**이고, 그 노드가 무엇을 만들어 내는지를 가리킨다
+(2026-08-20 개편 — 구 expand·retrieve·plan·cut·bounds·verify·drop0·rank·select).
+구현을 이름에 넣지 않는다: 구 `drop0` 은 임계값이 바뀌면 거짓말이 되는 이름이었고,
+LLM 사용 여부도 이름에 박지 않는다 — 이 파이프라인에선 단계가 LLM↔규칙 사이를
+오간 전례가 있다(구 bounds 의 시작 판정이 set_bounds 규칙으로 내려온 것처럼).
 
 2026-08-20 재배선 — cutrank 를 해체했다:
-- **절단이 마지막**(select). 예전에는 경계 확정 전에 잘랐고 그 뒤 endfix 가 끝을 늘려
-  예산 보장이 무효가 됐다 (실측: 900초 요청에 947~1018초).
-- **bounds** 가 시작·끝을 함께 정한다. 따로 물으면 서로를 모른다 — 시작을 25초 당기면
-  끝의 여유도 달라진다. 홈런이 FULL_CLIP_TAGS 라 앵커 로직을 건너뛰어 '주자가 뛰는
-  장면'부터 시작하던 문제(v202 장면 11)도 여기서 잡는다.
-- **verify 가 값을 한다**. 예전에는 소견 전용이라 출력물을 바꾸는 경로가 아예 없었다.
-  이제 클립별 일치도(0~3)를 매기고 select 가 자를 때 그 점수를 쓴다. 기각권은 여전히
-  없다 — 필수층(득점·역전·동점·끝내기·경기 종료)은 0점이어도 유지한다.
-- **expand** 가 질의를 중계의 언어로 옮긴다 (실측: 추상 질의 최고 유사도 0.58 vs
-  구체 질의 0.66~0.78).
+- **절단이 마지막**(fill_budget). 예전에는 경계 확정 전에 잘랐고 그 뒤 끝 보정이
+  끝을 늘려 예산 보장이 무효가 됐다 (실측: 900초 요청에 947~1018초).
+- **set_bounds 가 정하고 refine_bounds 가 다듬는다.** 시작·끝을 함께 보는 이유는
+  따로 물으면 서로를 모르기 때문이다 — 시작을 25초 옮기면 끝의 여유도 달라진다.
+- **score_match 가 값을 한다**. 예전에는 소견 전용이라 출력물을 바꾸는 경로가 아예
+  없었다. 이제 클립별 일치도(0~3)를 매기고 fill_budget 이 그 점수를 쓴다. 기각권은
+  여전히 없다 — 필수층(득점·역전·동점·끝내기·경기 종료)은 0점이어도 유지한다.
+- **rephrase_query** 가 질의를 중계의 언어로 옮긴다 (실측: 추상 질의 최고 유사도
+  0.58 vs 구체 질의 0.66~0.78).
 
 완화 사다리:
-  L1   투구 앵커 없는 클립 → 통째 폴백 (cut 내장)
-  L2   선곡 검산 후 0건 → feedback → plan 재선곡 (MAX_REPLAN 회)
+  L1   투구 앵커 없는 클립 → 통째 폴백 (set_bounds 내장)
+  L2   선곡 검산 후 0건 → retry_select → select_clips 재선곡 (MAX_REPLAN 회)
   L2.5 전 클립이 예산 초과 → 최단 1건 구제 (select.rescue_longest)
   L3   그래도 0건 → status=empty
 
-retrieve 실패는 전파 — bench4 의 fail-open 폐기 (design.md §2).
+retrieve_evidence 실패는 전파 — bench4 의 fail-open 폐기 (design.md §2).
 그래프는 무상태 배선이라 프로세스당 1회 컴파일.
 """
 
 import asyncio
 import inspect
-import math
-import re
 
 from langgraph.graph import END, START, StateGraph
 
@@ -45,7 +50,7 @@ from vector.store import QUERY_INSTRUCT, VectorStore
 
 log = get_logger(__name__)
 
-EVIDENCE_SCENES_MAX = 8      # plan 에 주입할 후보 장면 상한 (bench4 vector.py 운영값)
+EVIDENCE_SCENES_MAX = 8      # select_clips 에 주입할 후보 장면 상한 (bench4 vector.py 운영값)
 EVIDENCE_SNIPPETS_MAX = 2    # 장면당 증거 스니펫 상한
 ORPHAN_MAX = 3               # 장면밖 증거 표기 상한 (발행 누락 의심 신호용)
 
@@ -56,28 +61,30 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
     settings 의 use_* 플래그로 새 단계를 끌 수 있다 — 여러 변경을 한꺼번에 넣으면
     "무엇이 달라졌나"는 트레이스로 봐도 "어느 변경 때문인가"는 갈리지 않는다.
     """
-    use_expand = getattr(settings, "use_expand", True)
-    use_bounds = getattr(settings, "use_bounds", True)
-    use_select = getattr(settings, "use_select", True)
+    # Settings 필드명(use_expand 등)은 .env 계약이라 유지 — 지역 변수만 노드명에 맞춘다.
+    use_rephrase = getattr(settings, "use_expand", True)
+    use_refine = getattr(settings, "use_bounds", True)
+    use_fill = getattr(settings, "use_select", True)
 
-    async def expand_node(st: ComposeState) -> dict:
+    async def rephrase_query_node(st: ComposeState) -> dict:
         """질의 → 중계 문장형 검색어 + 메타 필터 힌트. 실패하면 원 질의로 폴백."""
-        if not use_expand:
+        if not use_rephrase:
             return {"phrases": [st["query"]], "filters": []}
         try:
             text = await llm.chat(prompts.EXPAND_SYSTEM, prompts.expand_user(st["query"]),
-                                  thinking=False, trace=st.get("trace"), name="expand")
+                                  thinking=False, trace=st.get("trace"),
+                                  name="rephrase_query")
             phrases, filters = plan.parse_expand(text)
         except Exception as e:                       # noqa: BLE001 — 보조 단계, 죽이지 않는다
-            log.warning("expand 실패(원 질의로 진행): %s", e)
+            log.warning("rephrase_query 실패(원 질의로 진행): %s", e)
             phrases, filters = [], []
         phrases = phrases or [st["query"]]
-        log.info("expand: 검색어 %s / 필터 %s", phrases, filters or "-")
+        log.info("rephrase_query: 검색어 %s / 필터 %s", phrases, filters or "-")
         if tr := st.get("trace"):
-            tr.node("expand", phrases=phrases, filters=filters)
+            tr.node("rephrase_query", phrases=phrases, filters=filters)
         return {"phrases": phrases, "filters": filters}
 
-    async def retrieve_node(st: ComposeState) -> dict:
+    async def retrieve_evidence_node(st: ComposeState) -> dict:
         """검색어마다 임베딩해 병합 — 필터 건 검색과 안 건 검색을 함께 돌린다.
 
         하드 필터는 쓰지 않는다: 장면 65 는 기록이 '범타'인데 화면은 호수비였다.
@@ -92,14 +99,14 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
                 hits += await store.search(qv, v_id, extra=_label_filter(f))
         ev, orphan = _group_hits(_dedup_hits(hits))
         if ev or orphan:
-            log.info("retrieve: 후보 장면 %s, 장면밖 %d건",
+            log.info("retrieve_evidence: 후보 장면 %s, 장면밖 %d건",
                      [g["scene_id"] for g in ev], len(orphan))
         if tr := st.get("trace"):
-            tr.node("retrieve", candidates=[g["scene_id"] for g in ev],
+            tr.node("retrieve_evidence", candidates=[g["scene_id"] for g in ev],
                     orphan=len(orphan), hits=len(hits))
         return {"evidence": ev, "evidence_orphan": orphan}
 
-    async def plan_node(st: ComposeState) -> dict:
+    async def select_clips_node(st: ComposeState) -> dict:
         inv = st["inv"]
         # 호출자 예산을 LLM 에게도 알린다 — 기본값만 보내던 탓에 900s 요청에도 모델이
         # "예산: 180" 으로 답하며 그 전제로 선곡했다 (2026-08-19 실측 로그).
@@ -112,51 +119,52 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
                 # orphan 은 프롬프트에서 뺀다 (선곡 불가라 자리만 차지)
                 plan.render_evidence(st.get("evidence", []), [], list(inv.scenes)),
             ),
-            thinking=True, trace=st.get("trace"), name="plan",
+            thinking=True, trace=st.get("trace"), name="select_clips",
         )
-        log.info("plan 응답: %r", text)
+        log.info("select_clips 응답: %r", text)
         spec = plan.parse(text, list(inv.scenes))
         if st.get("budget"):
             spec["budget"] = st["budget"]      # 명시 입력이 질의 해석보다 우선
         spec["picked"] = list(dict.fromkeys(spec["picked"]))   # 중복 선곡 제거
-        log.info("plan: %s 선곡 %s", plan.spec_line(spec), spec["picked"])
+        log.info("select_clips: %s 선곡 %s", plan.spec_line(spec), spec["picked"])
         if tr := st.get("trace"):
-            tr.node("plan", spec={k: v for k, v in spec.items() if k != "raw"})
+            tr.node("select_clips", spec={k: v for k, v in spec.items() if k != "raw"})
         return {"spec": spec, "attempt": st.get("attempt", 0) + 1}
 
-    async def cut_node(st: ComposeState) -> dict:
-        """경계 계산만 — 순위도 절단도 하지 않는다 (구 cutrank 의 1/3).
+    async def set_bounds_node(st: ComposeState) -> dict:
+        """구간 확정 — 순위도 절단도 하지 않는다 (구 cutrank 의 1/3).
 
         선곡분에 **필수 장면(득점·역전·동점·끝내기·경기 종료)을 합쳐서** 컷한다.
-        select 의 필수층이 일하려면 그 장면이 후보에 있어야 하는데, plan 이 놓치면
-        영영 들어올 수 없기 때문이다 (구 backfill 이 하던 회수를 여기서 보장한다).
-        컷 계산은 순수 함수라 몇 건 늘어도 비용이 없고, LLM 을 타는 bounds·verify 의
-        입력만 그만큼 커진다.
+        fill_budget 의 필수층이 일하려면 그 장면이 후보에 있어야 하는데, select_clips
+        가 놓치면 영영 들어올 수 없기 때문이다 (구 backfill 이 하던 회수를 여기서
+        보장한다). 구간 계산은 순수 함수라 몇 건 늘어도 비용이 없고, LLM 을 타는
+        refine_bounds·score_match 의 입력만 그만큼 커진다.
         """
         inv = st["inv"]
         picked = list(st["spec"]["picked"])
         must = [r["scene_id"] for r in inv.scenes
                 if r["scene_id"] not in picked and select_mod.is_must(r)]
         if must:
-            log.info("cut: 필수 장면 회수 %s (plan 미선곡)", must)
+            log.info("set_bounds: 필수 장면 회수 %s (select_clips 미선곡)", must)
         clips = rank.order(list(inv.scenes), picked + must)
         for r in clips:
             r["cut"] = cut.clip(r, list(inv.segs), inv.utts)
         if tr := st.get("trace"):
-            tr.node("cut", clips=[(r["scene_id"], round(r["cut"]["cs"]), round(r["cut"]["ce"]))
-                                  for r in clips])
+            tr.node("set_bounds",
+                    clips=[(r["scene_id"], round(r["cut"]["cs"]), round(r["cut"]["ce"]))
+                           for r in clips])
         return {"clips": clips}
 
     def route(st: ComposeState) -> str:
         if st.get("clips"):
-            return "bounds"
-        return "feedback" if st["attempt"] <= vocab.MAX_REPLAN else "empty"
+            return "refine_bounds"
+        return "retry_select" if st["attempt"] <= vocab.MAX_REPLAN else "end_empty"
 
-    def feedback_node(st: ComposeState) -> dict:
+    def retry_select_node(st: ComposeState) -> dict:
         return {"feedback": (f"선곡 {st['spec']['picked']}이 검산에서 비었다. "
                              f"질의를 어휘로 다시 번역해 골라라.")}
 
-    async def bounds_node(st: ComposeState) -> dict:
+    async def refine_bounds_node(st: ComposeState) -> dict:
         """시작·끝을 함께 정한다. 후보는 결정적으로 만들고 LLM 은 고르기만 한다.
 
         **클립 1건 = 콜 1건으로 펼쳐 동시에 보낸다.** 한 콜에 몰면 전송이 직렬이라
@@ -166,10 +174,10 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         """
         inv = st["inv"]
         clips = [dict(r, cut=dict(r["cut"])) for r in st["clips"]]     # 복사 후 수정
-        if not use_bounds:
+        if not use_refine:
             return {"clips": clips}
         rows = bounds_mod.build_rows(clips, list(inv.segs), inv.utts, list(inv.pitches))
-        log.info("bounds 대상 %d/%d클립 — 나머지는 투구 앵커가 있어 cut 경계 그대로",
+        log.info("refine_bounds 대상 %d/%d클립 — 나머지는 투구 앵커가 있어 set_bounds 경계 그대로",
                  len(rows), len(clips))
         if not rows:
             return {"clips": clips}
@@ -179,9 +187,9 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             try:
                 return await llm.chat(
                     prompts.BOUNDS_SYSTEM, prompts.bounds_user([row]), thinking=True,
-                    trace=st.get("trace"), name=f"bounds[{row['scene_id']}]")
+                    trace=st.get("trace"), name=f"refine_bounds[{row['scene_id']}]")
             except Exception as e:                   # noqa: BLE001 — 건별 격리
-                log.warning("bounds 실패(장면%d 경계 유지): %s", row["scene_id"], e)
+                log.warning("refine_bounds 실패(장면%d 경계 유지): %s", row["scene_id"], e)
                 return ""
 
         texts = await asyncio.gather(*(one(r) for r in rows))
@@ -189,20 +197,20 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         for row, text in zip(rows, texts):
             moved += bounds_mod.apply(clips, [row], text)
         if moved:
-            log.info("bounds: %d콜 동시 · 경계 이동 %s", len(rows), moved)
+            log.info("refine_bounds: %d콜 동시 · 경계 이동 %s", len(rows), moved)
         if tr := st.get("trace"):
-            tr.node("bounds", asked=len(rows), moved=moved)
+            tr.node("refine_bounds", asked=len(rows), moved=moved)
         return {"clips": clips, "endfix_moved": moved}
 
-    async def verify_node(st: ComposeState) -> dict:
-        """클립별 채점 — 기각권은 없다. select 가 자를 때 이 점수를 쓴다.
+    async def score_match_node(st: ComposeState) -> dict:
+        """클립별 채점 — 기각권은 없다. fill_budget 이 자를 때 이 점수를 쓴다.
 
-        bounds 와 같은 이유로 **클립당 1콜을 동시에** 보낸다. 채점 기준은 클립 자신과
+        refine_bounds 와 같은 이유로 **클립당 1콜을 동시에** 보낸다. 채점 기준은 클립 자신과
         명세뿐이라 다른 클립을 볼 이유가 없었다.
 
         실패를 삼킨다: 이 콜 하나가 이미 확정된 클립을 통째로 날리던 문제(audit 5-1).
         이제 격리 단위가 클립이라 한 건이 실패해도 나머지 채점은 남는다 (점수 없는
-        클립은 select 가 DEFAULT_SCORE 로 중립 처리).
+        클립은 fill_budget 이 DEFAULT_SCORE 로 중립 처리).
         """
         clips = st["clips"]
         spec_line = plan.spec_line(st["spec"])
@@ -213,7 +221,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
                     prompts.VERIFY_SYSTEM,
                     prompts.verify_user(st["query"], spec_line, _packet(st["inv"], c)),
                     thinking=True, trace=st.get("trace"),
-                    name=f"verify[{c['scene_id']}]",
+                    name=f"score_match[{c['scene_id']}]",
                 )
                 got = plan.parse_verify(text)
                 sid = c["scene_id"]
@@ -223,25 +231,25 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
                     return {sid: got[sid]}
                 return {sid: next(iter(got.values()))} if len(got) == 1 else {}
             except Exception as e:                   # noqa: BLE001 — 소견이 편성을 죽이면 안 된다
-                log.warning("verify 실패(장면%d 채점 없이 진행): %s", c["scene_id"], e)
+                log.warning("score_match 실패(장면%d 채점 없이 진행): %s", c["scene_id"], e)
                 return {}
 
         scores: dict[int, dict] = {}
         for part in await asyncio.gather(*(one(c) for c in clips)):
             scores.update(part)
-        log.info("verify: %d콜 동시 · 채점 %d건", len(clips), len(scores))
+        log.info("score_match: %d콜 동시 · 채점 %d건", len(clips), len(scores))
         broken = [i for i, v in scores.items() if not v["complete"]]
         if broken:
-            log.warning("verify 완결성 문제 %s — startfix 신호(클립은 유지)", broken)
+            log.warning("score_match 완결성 문제 %s — 시작 보정 신호(클립은 유지)", broken)
         if tr := st.get("trace"):
-            tr.node("verify", scores=scores, incomplete=broken)
+            tr.node("score_match", scores=scores, incomplete=broken)
         return {"scores": scores}
 
-    def drop0_node(st: ComposeState) -> dict:
-        """verify 0점 제외 — 순수 필터. 필수 장면은 예외(사실이 소견을 이긴다).
+    def drop_unmatched_node(st: ComposeState) -> dict:
+        """score_match 0점 제외 — 순수 필터. 필수 장면은 예외(사실이 소견을 이긴다).
 
-        rank 에 넘어가는 후보를 줄여 프롬프트를 짧게 하고, "무관한 클립으로 예산을
-        채우는" 경로를 select 이전에 끊는다.
+        order_clips 에 넘어가는 후보를 줄여 프롬프트를 짧게 하고, "무관한 클립으로
+        예산을 채우는" 경로를 fill_budget 이전에 끊는다.
         """
         scores = st.get("scores", {})
         keep, cut_ = [], []
@@ -252,14 +260,14 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         if cut_:
             log.info("0점 제외 %s", [c["scene_id"] for c in cut_])
         if tr := st.get("trace"):
-            tr.node("drop0", kept=len(keep), zero=[c["scene_id"] for c in cut_])
-        return {"clips": keep, "zero_dropped": [(c["scene_id"], "질의와 무관(verify 0점)")
+            tr.node("drop_unmatched", kept=len(keep), zero=[c["scene_id"] for c in cut_])
+        return {"clips": keep, "zero_dropped": [(c["scene_id"], "질의와 무관(score_match 0점)")
                                                 for c in cut_]}
 
-    async def rank_node(st: ComposeState) -> dict:
+    async def order_clips_node(st: ComposeState) -> dict:
         """남은 후보를 질의에 맞는 **순서**로 줄 세운다 (1콜 — 비교라 나눌 수 없다).
 
-        담을지 말지는 정하지 않는다. 순서만 받고 예산 합산·절단은 select 가 한다 —
+        담을지 말지는 정하지 않는다. 순서만 받고 예산 합산·절단은 fill_budget 이 한다 —
         예산 절단은 산술이고 LLM 은 산술을 못 한다(실측: 900초 요청에 947~1018초).
         """
         clips, spec = st["clips"], st["spec"]
@@ -273,7 +281,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         # 필수층이 예산을 다 쓰면 순위를 매겨도 담길 자리가 없다 — 1~2분짜리 콜을
         # 낭비하지 않는다 (v201 실측: 필수 16건 1103s > 예산 900s → 남은 0s).
         if left < min(c["cut"]["ce"] - c["cut"]["cs"] for c in rest):
-            log.info("rank 생략: 남은 예산 %ds 로는 최단 후보도 못 담는다", left)
+            log.info("order_clips 생략: 남은 예산 %ds 로는 최단 후보도 못 담는다", left)
             return {"order": []}
         try:
             text = await llm.chat(
@@ -284,21 +292,21 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
                     [(c, scores.get(c["scene_id"], {}).get("score",
                                                            select_mod.DEFAULT_SCORE))
                      for c in sorted(rest, key=lambda c: c["cut"]["cs"])]),
-                thinking=True, trace=st.get("trace"), name="rank")
+                thinking=True, trace=st.get("trace"), name="order_clips")
             order = select_mod.parse_order(text, {c["scene_id"] for c in rest})
         except Exception as e:                       # noqa: BLE001 — 폴백이 있다
-            log.warning("rank 실패(점수순 폴백): %s", e)
+            log.warning("order_clips 실패(점수순 폴백): %s", e)
             order = []
-        log.info("rank: 후보 %d건 순서 %s", len(rest), order or "(폴백)")
+        log.info("order_clips: 후보 %d건 순서 %s", len(rest), order or "(폴백)")
         if tr := st.get("trace"):
-            tr.node("rank", asked=len(rest), order=order, budget_left=left)
+            tr.node("order_clips", asked=len(rest), order=order, budget_left=left)
         return {"order": order}
 
-    def select_node(st: ComposeState) -> dict:
+    def fill_budget_node(st: ComposeState) -> dict:
         """예산 확정 — 층 순서로 채우고, 마지막이라 예산이 정확하다."""
         spec = st["spec"]
         clips, scores = st["clips"], st.get("scores", {})
-        if not use_select:
+        if not use_fill:
             picked, spare = _assemble(clips, spec["budget"])
             total = sum(r["cut"]["ce"] - r["cut"]["cs"] for r in picked)
             return {"picked": picked, "spare": spare, "total": int(total), "status": "ok"}
@@ -307,9 +315,9 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             picked = select_mod.rescue_longest(clips, spec["budget"])
             total = int(sum(r["cut"]["ce"] - r["cut"]["cs"] for r in picked))
         if note := select_mod.backfill_note(spec):
-            log.info("select: %s", note)
+            log.info("fill_budget: %s", note)
         if tr := st.get("trace"):
-            tr.node("select", picked=[c["scene_id"] for c in picked], total=total,
+            tr.node("fill_budget", picked=[c["scene_id"] for c in picked], total=total,
                     dropped=[(c["scene_id"], why) for c, why in dropped])
         return {
             "picked": picked, "total": total, "status": "ok" if picked else "empty",
@@ -318,34 +326,35 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
             "suspicions": [(i, v["reason"]) for i, v in scores.items() if v["score"] <= 1],
         }
 
-    def empty_node(st: ComposeState) -> dict:
+    def end_empty_node(st: ComposeState) -> dict:
         return {"picked": [], "status": "empty"}
 
     g = StateGraph(ComposeState)
-    g.add_node("expand", expand_node)
-    g.add_node("retrieve", retrieve_node)
-    g.add_node("plan", plan_node)
-    g.add_node("cut", cut_node)
-    g.add_node("feedback", feedback_node)
-    g.add_node("bounds", bounds_node)
-    g.add_node("verify", verify_node)
-    g.add_node("drop0", drop0_node)
-    g.add_node("rank", rank_node)
-    g.add_node("select", select_node)
-    g.add_node("empty", empty_node)
-    g.add_edge(START, "expand")
-    g.add_edge("expand", "retrieve")
-    g.add_edge("retrieve", "plan")
-    g.add_edge("plan", "cut")
+    g.add_node("rephrase_query", rephrase_query_node)
+    g.add_node("retrieve_evidence", retrieve_evidence_node)
+    g.add_node("select_clips", select_clips_node)
+    g.add_node("set_bounds", set_bounds_node)
+    g.add_node("retry_select", retry_select_node)
+    g.add_node("refine_bounds", refine_bounds_node)
+    g.add_node("score_match", score_match_node)
+    g.add_node("drop_unmatched", drop_unmatched_node)
+    g.add_node("order_clips", order_clips_node)
+    g.add_node("fill_budget", fill_budget_node)
+    g.add_node("end_empty", end_empty_node)
+    g.add_edge(START, "rephrase_query")
+    g.add_edge("rephrase_query", "retrieve_evidence")
+    g.add_edge("retrieve_evidence", "select_clips")
+    g.add_edge("select_clips", "set_bounds")
     g.add_conditional_edges(
-        "cut", route, {"feedback": "feedback", "bounds": "bounds", "empty": "empty"})
-    g.add_edge("feedback", "plan")
-    g.add_edge("bounds", "verify")
-    g.add_edge("verify", "drop0")
-    g.add_edge("drop0", "rank")
-    g.add_edge("rank", "select")
-    g.add_edge("select", END)
-    g.add_edge("empty", END)
+        "set_bounds", route, {"retry_select": "retry_select",
+                              "refine_bounds": "refine_bounds", "end_empty": "end_empty"})
+    g.add_edge("retry_select", "select_clips")
+    g.add_edge("refine_bounds", "score_match")
+    g.add_edge("score_match", "drop_unmatched")
+    g.add_edge("drop_unmatched", "order_clips")
+    g.add_edge("order_clips", "fill_budget")
+    g.add_edge("fill_budget", END)
+    g.add_edge("end_empty", END)
     return g.compile()
 
 
@@ -459,35 +468,6 @@ def _backfill(scenes, segs, utts, spec, picked: list[dict],
     if added:
         log.info("예산 미달 충원: 대상 부합 %d장면 추가 → %ds", added, total)
     return sorted(picked, key=lambda r: r["cut"]["cs"]), total
-
-
-def _apply_endfix(picked: list[dict], rows, text: str) -> list[str]:
-    """endfix 제안 처분 — "장면 N: 유지|<초>" 파싱 후 검증 통과분만 적용.
-
-    수용 조건: ① 제안 초가 그 클립에 제시한 발화의 실제 끝(올림)과 일치(±1s 허용)
-    ② 현재 끝보다 뒤 ③ 연장 폭 ENDFIX_MAX_EXT_SEC 이내. 그 외는 무시 (임의 초 기각).
-    """
-    shown = {sid: (ce, near) for sid, ce, near in rows}
-    by_id = {r["scene_id"]: r for r in picked}
-    moved = []
-    for line in text.splitlines():
-        m = re.match(r"장면\s*(\d+)\s*:\s*(\d+)", line.strip())
-        if not m:
-            continue
-        sid, new_end = int(m.group(1)), int(m.group(2))
-        if sid not in shown or sid not in by_id:
-            continue
-        ce, near = shown[sid]
-        ok = any(abs(new_end - math.ceil(ue)) <= 1 for _, ue, _ in near)
-        if ok and ce < new_end <= ce + vocab.ENDFIX_MAX_EXT_SEC:
-            cut_ = by_id[sid]["cut"]
-            cut_["ce"] = new_end
-            cut_["mode"] += "+끝보정(agent)"
-            moved.append(f"장면{sid} {ce}→{new_end}")
-        elif new_end != ce:
-            log.info("endfix 기각: 장면%d %d→%d (발화 끝 불일치 또는 상한 초과)",
-                     sid, ce, new_end)
-    return moved
 
 
 # 패킷에 실을 샷 — 앞뒤를 나눠 잡는다. 앞에서 8개만 자르면 **마지막 샷이 사라지는데**

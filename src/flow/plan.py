@@ -1,7 +1,8 @@
-"""plan — 인벤토리 렌더 + 응답(줄 형식) 파싱 + select 검산 (bench4 compose/plan.py 이식).
+"""select_clips 노드의 재료 — 인벤토리 렌더 + 응답(줄 형식) 파싱 + 선곡 검산.
 
 "LLM 이 제안, 사실이 처분": 선곡은 인벤토리에 실존하는 scene_id 로만 검산 통과.
-LLM 호출 자체는 nodes 가 한다 — 여기는 순수 렌더·파싱만 (테스트 단독 실행 가능).
+LLM 호출 자체는 graph 가 한다 — 여기는 순수 렌더·파싱만 (테스트 단독 실행 가능).
+rephrase_query·score_match 응답 파서(parse_expand·parse_verify)도 여기 있다.
 """
 
 import re
@@ -36,7 +37,7 @@ def render_situation(outs: int | None, bases: str | None) -> str:
 
 
 def render_inventory(scenes: list[dict]) -> str:
-    """t_scene_baseball 행 → plan 이 보는 목록 한 줄씩 (경기 단위라 전 행 — 2~3KB).
+    """t_scene_baseball 행 → select_clips 가 보는 목록 한 줄씩 (경기 단위라 전 행 — 2~3KB).
 
     점수에 원정팀명을 붙인다 — 가운데 토막만 떼면(`9-7`) 모델이 매 행마다
     초/말 → 원정/홈 → 팀명 → 어느 쪽이 올랐나를 3단 추론해야 한다.
@@ -61,7 +62,7 @@ EVIDENCE_TEXT_MAX = 70          # 스니펫 표기 길이 (문장 중간 절단�
 
 def render_evidence(evidence: list[dict], orphan: list[dict],
                     scenes: list[dict] | None = None) -> str:
-    """retrieve 결과 → plan 이 보는 벡터 후보 섹션. 비어 있으면 빈 문자열 (섹션 생략).
+    """retrieve_evidence 결과 → select_clips 가 보는 벡터 후보 섹션. 비면 빈 문자열.
 
     증거마다 **종류(해설·화면·자막)를 붙이고 종류별로 한 줄씩** 낸다. 종류를 지우면
     모델이 "이게 사람이 한 말인지 화면 설명인지" 를 모르는데, system 프롬프트는
@@ -127,10 +128,10 @@ def spec_line(spec: dict) -> str:
 
 
 
-# ── expand / verify 파서 (신설) ───────────────────────────
+# ── rephrase_query / score_match 응답 파서 ────────────────
 
 def parse_expand(text: str) -> tuple[list[str], list[str]]:
-    """expand 응답 → (검색어, 필터). 형식이 깨지면 빈 값 — 호출부가 원 질의로 폴백한다."""
+    """rephrase_query 응답 → (검색어, 필터). 깨지면 빈 값 — 호출부가 원 질의로 폴백."""
     phrases: list[str] = []
     filters: list[str] = []
     for line in text.splitlines():
@@ -148,10 +149,10 @@ _SCORE_LINE = re.compile(r"장면\s*(\d+)\s*[:：]\s*([0-3])\s*(정상|문제)?\
 
 
 def parse_verify(text: str) -> dict[int, dict]:
-    """verify 응답 → {scene_id: {score, complete, reason}}.
+    """score_match 응답 → {scene_id: {score, complete, reason}}.
 
     기각권이 없으므로 '무엇을 뺄까'가 아니라 '얼마나 맞나'만 읽는다. 파싱 실패한 줄은
-    버린다 — 점수가 없는 클립은 select 가 기본값으로 다룬다(빠지지 않는다).
+    버린다 — 점수가 없는 클립은 fill_budget 이 기본값으로 다룬다(빠지지 않는다).
     """
     out: dict[int, dict] = {}
     for line in text.splitlines():
