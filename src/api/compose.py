@@ -180,7 +180,7 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
         "comp_id": comp_id,
         "spec": {k: v for k, v in (state.get("spec") or {}).items() if k != "raw"},
         "clips": clips,
-        "duration": sum(c["end"] - c["start"] for c in clips),
+        "duration": round(sum(c["end"] - c["start"] for c in clips), 1),
         "suspicions": state.get("suspicions", []),
         "endfix_moved": state.get("endfix_moved", []),
         "dropped": state.get("dropped", []),
@@ -218,11 +218,17 @@ async def _render_after(st, req: ComposeRequest, comp_id: int, status: str,
 
 
 def _clip_row(r: dict) -> dict:
-    """채택 행 → 저장·응답용 클립 요약 (초 단위)."""
+    """채택 행 → 저장·응답용 클립 요약 (초 — **소수 유지**).
+
+    int() 로 내리지 않는다. t_segment 경계가 소수라 4369.3s('투구' 샷 시작)를 내리면
+    4369s 가 되어 직전 '리액션' 샷 꼬리에서 시작한다 — 파이프라인이 투구에 맞춰 둔
+    시작을 저장 직전에 되돌리는 셈이었다 (v201 comp24 실측: 16클립 중 '투구' 시작 0건).
+    컬럼은 time(3) 이고 SEC_TO_TIME 이 밀리초를 그대로 받는다.
+    """
     before, after = r["score_before"] or "?", r["score"].split()[1] if r["score"] else "?"
     return {
         "scene_id": r["scene_id"], "h_id": r["h_id"],
-        "start": int(r["cut"]["cs"]), "end": int(r["cut"]["ce"]),
+        "start": r["cut"]["cs"], "end": r["cut"]["ce"],
         "label": r["scene_type"], "labels": r["labels"] or "",
         "inning": r["inning"] or "", "score_before": before, "score_after": after,
         "cut_mode": r["cut"]["mode"],
