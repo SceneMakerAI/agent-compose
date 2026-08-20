@@ -227,23 +227,20 @@ def test_vocab_validate():
 
 # ── 프롬프트 byte 등가 (compose-flow.md §5-1 게이트) ───
 
-def test_prompts_byte_equal_bench4(bench4):
-    """PLAN 은 어휘 2줄, VERIFY 는 A2 사유 줄만 다르고 나머지는 byte 등가."""
+def test_prompt_renders_still_equal_bench4(bench4):
+    """**렌더 함수**는 bench4 와 byte 등가 — 구조가 갈리면 여기서 걸린다.
+
+    system 문구(PLAN·ENDFIX·BOUNDS·RANK·VERIFY)는 등가 대상에서 뺐다 (2026-08-20).
+    이식 검증용 게이트였는데 지금은 운영하며 계속 손보는 대상이라, 문구를 고칠 때마다
+    bench4 원문을 같이 고쳐야 하는 역전이 생긴다. 문구가 아니라 **재료 조립**이
+    안 틀어졌는지가 이 테스트의 관심사다.
+    """
     spec = importlib.util.spec_from_file_location("b4_prompt", _BENCH4 / "compose" / "prompt.py")
     b4p = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(b4p)
     from flow import prompts
-    plan_ours = prompts.PLAN_SYSTEM.splitlines()
-    plan_theirs = b4p.PLAN_SYSTEM.splitlines()
-    plan_diff = [(a, b) for a, b in zip(plan_theirs, plan_ours) if a != b]
-    assert len(plan_ours) == len(plan_theirs)
-    # 어휘 줄만 다르다 — 문구·규칙이 갈라지면 여기서 걸린다
-    assert [b for _, b in plan_diff] == [f"- 태그: {prompts.TAG_VOCAB}",
-                                         f"- 라벨: {prompts.LABEL_VOCAB}"]
-    assert prompts.ENDFIX_SYSTEM == b4p.ENDFIX_SYSTEM
-    # VERIFY 는 등가 대상에서 뺀다 — 2026-08-20 재배선에서 "기각 목록"이 아니라
-    # "클립별 일치도 채점"으로 역할 자체가 바뀌었다. bench4 문구와 비교할 대상이 아니다.
-    # user 프롬프트 렌더 — 인벤토리 헤더의 '상황' 열만 다르고 나머지는 byte 등가
+
+    # user 프롬프트 렌더 — 인벤토리 헤더에 타자 열이 붙은 것만 다르다
     u_ours = prompts.plan_user("q", "g", "inv", 180, "fb", "ev").splitlines()
     u_theirs = b4p.plan_user("q", "g", "inv", 180, "fb", "ev").splitlines()
     u_diff = [(a, b) for a, b in zip(u_theirs, u_ours) if a != b]
@@ -251,3 +248,17 @@ def test_prompts_byte_equal_bench4(bench4):
     assert [b for _, b in u_diff] == ["번호  태그  라벨  이닝  상황(아웃·주자)  점수(전→후)  타자  길이"]
     rows = [(7, 100, [(95.0, 104.2, "발화")])]
     assert prompts.endfix_user(rows) == b4p.endfix_user(rows)
+
+
+def test_plan_system_keeps_vocab_and_budget_rule():
+    """문구는 자유롭게 고치되 이 둘은 남아야 한다 — 어휘 렌더와 분량 규칙.
+
+    어휘를 하드코딩하면 vision3 에 태그가 늘어도 프롬프트만 옛 어휘로 남는다(보크 실측).
+    분량 규칙이 빠지면 plan 이 예산만큼만 골라 select 가 고를 재료가 없어진다.
+    """
+    from flow import prompts
+
+    assert f"- 태그: {prompts.TAG_VOCAB}" in prompts.PLAN_SYSTEM
+    assert f"- 라벨: {prompts.LABEL_VOCAB}" in prompts.PLAN_SYSTEM
+    assert "2배" in prompts.PLAN_SYSTEM
+    assert "{budget}" in prompts.PLAN_SYSTEM      # 호출부가 채우는 자리 — 없어지면 예산이 안 간다
