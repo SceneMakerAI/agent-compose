@@ -68,14 +68,10 @@ LABEL_EXTRA_MAX_SEC = 12
 # 대사 꼬리 스냅 상한 — 실측(comp 18·19): 삼진 7클립 중 5개가 발화 중간 절단,
 # 필요 연장 +4~8.2s → 9s 면 전부 회수, 별개 문장(+11s)은 자연 차단.
 DIALOGUE_TAIL_MAX_SEC = 9
-# endfix 수용 상한 — 상한 밖 발화를 제시했더니 LLM 이 그걸 골라 제안 전멸(실측 comp 28).
-ENDFIX_MAX_EXT_SEC = 12
-ENDFIX_UTT_MAX = 4
 
 # 완화 사다리 상한 — 미달 재선곡 폐기 근거: "다이빙 캐치"가 범타 13클립으로 희석(comp 28)
 # + thinking 재선곡 콜 1회 절감(~2.5분).
 MAX_REPLAN = 1
-UNDERFILL_MIN_FRAC = 0.7
 
 
 def validate() -> None:

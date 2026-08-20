@@ -141,7 +141,7 @@ def choose(clips: list[dict], spec: dict, scores: dict[int, dict],
             drop(c, "예산 초과")
 
     picked.sort(key=lambda c: c["cut"]["cs"])        # 서사 = 시간순
-    log.info("select: 채택 %d건 %.0fs/%ds (필수 %d · 순위 %s · 탈락 %d)",
+    log.info("fill_budget: 채택 %d건 %.0fs/%ds (필수 %d · 순위 %s · 탈락 %d)",
              len(picked), total, budget, len(must),
              "LLM" if order else "점수순 폴백", len(dropped))
     return picked, dropped, int(total)
@@ -161,14 +161,4 @@ def rescue_longest(clips: list[dict], budget: int) -> list[dict]:
     return [best]
 
 
-def backfill_note(spec: dict) -> str:
-    """충원이 왜 일어나지 않았는지 — 무동작이 로그에 안 남던 문제(audit 3-3) 대응."""
-    if spec.get("view") != "전체":
-        return f"관점={spec['view']} 이라 충원 생략 (홈/원정 기계 판별 불가)"
-    if not spec.get("targets"):
-        return "대상이 비어 충원 생략"
-    return ""
-
-
-__all__ = ["MUST_LABELS", "backfill_note", "choose", "is_must", "parse_order",
-           "rescue_longest"]
+__all__ = ["MUST_LABELS", "choose", "is_must", "parse_order", "rescue_longest"]

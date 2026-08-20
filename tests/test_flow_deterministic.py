@@ -155,11 +155,10 @@ def test_vocab_constants_equal_bench4(bench4):
     }
     assert vocab.RANK_LABEL_BONUS == c.RANK_LABEL_BONUS
     assert vocab.RANK_TAG_BONUS == c.RANK_TAG_BONUS
-    assert (vocab.LABEL_EXTRA_MAX_SEC, vocab.DIALOGUE_TAIL_MAX_SEC,
-            vocab.ENDFIX_MAX_EXT_SEC, vocab.ENDFIX_UTT_MAX,
-            vocab.MAX_REPLAN, vocab.UNDERFILL_MIN_FRAC) == (
-        c.LABEL_EXTRA_MAX_SEC, c.DIALOGUE_TAIL_MAX_SEC,
-        c.ENDFIX_MAX_EXT_SEC, c.ENDFIX_UTT_MAX, c.MAX_REPLAN, c.UNDERFILL_MIN_FRAC)
+    # endfix·underfill 상수는 그 단계가 사라져 대조 대상에서 뺐다 (2026-08-20).
+    # 등가 테스트가 죽은 상수를 붙잡아 두는 역전을 막는다 — 감시할 건 **쓰는 값**이다.
+    assert (vocab.LABEL_EXTRA_MAX_SEC, vocab.DIALOGUE_TAIL_MAX_SEC, vocab.MAX_REPLAN) == (
+        c.LABEL_EXTRA_MAX_SEC, c.DIALOGUE_TAIL_MAX_SEC, c.MAX_REPLAN)
 
 
 def test_vocab_tags_synced_with_vision3():
@@ -246,8 +245,6 @@ def test_prompt_renders_still_equal_bench4(bench4):
     u_diff = [(a, b) for a, b in zip(u_theirs, u_ours) if a != b]
     assert len(u_ours) == len(u_theirs)
     assert [b for _, b in u_diff] == ["번호  태그  라벨  이닝  상황(아웃·주자)  점수(전→후)  타자  길이"]
-    rows = [(7, 100, [(95.0, 104.2, "발화")])]
-    assert prompts.endfix_user(rows) == b4p.endfix_user(rows)
 
 
 def test_plan_system_keeps_vocab_and_budget_rule():

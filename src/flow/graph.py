@@ -314,8 +314,6 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         if not picked:
             picked = select_mod.rescue_longest(clips, spec["budget"])
             total = int(sum(r["cut"]["ce"] - r["cut"]["cs"] for r in picked))
-        if note := select_mod.backfill_note(spec):
-            log.info("fill_budget: %s", note)
         if tr := st.get("trace"):
             tr.node("fill_budget", picked=[c["scene_id"] for c in picked], total=total,
                     dropped=[(c["scene_id"], why) for c, why in dropped])

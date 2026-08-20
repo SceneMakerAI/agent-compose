@@ -223,13 +223,6 @@ def test_rescue_longest_when_nothing_qualifies():
     assert [c["scene_id"] for c in select.rescue_longest(clips, 60)] == [1]
 
 
-def test_backfill_note_explains_no_op():
-    """충원 무동작에 사유를 남긴다 — 로그만 보면 시도한 것처럼 읽히던 문제."""
-    assert "관점" in select.backfill_note({**SPEC, "view": "홈"})
-    assert "대상" in select.backfill_note({**SPEC, "targets": []})
-    assert select.backfill_note(SPEC) == ""
-
-
 def test_dropped_has_no_duplicates():
     """한 클립은 탈락 목록에 한 번만 — 층을 지날 때마다 다시 떨어뜨리지 않는다.
 

@@ -96,7 +96,7 @@ def render_evidence(evidence: list[dict], orphan: list[dict],
 def parse(text: str, scenes: list[dict]) -> dict:
     """LLM 응답(줄 형식) → 명세 dict. 선곡은 실존 scene_id 로 검산(select)."""
     spec = {"mode": "compose", "targets": [], "view": "전체",
-            "budget": DEFAULT_BUDGET_SEC, "picked": [], "reason": "", "raw": text}
+            "budget": DEFAULT_BUDGET_SEC, "picked": [], "raw": text}
     known = {r["scene_id"] for r in scenes}
     for line in text.splitlines():
         line = line.strip()
@@ -116,8 +116,6 @@ def parse(text: str, scenes: list[dict]) -> dict:
             spec["picked"] = [i for i in ids if i in known]        # select: 사실 검산
             if ghost := [i for i in ids if i not in known]:
                 log.warning("선곡 검산: 실존하지 않는 장면 제거 %s", ghost)
-        elif line.startswith("사유:"):
-            spec["reason"] = line[3:].strip()
     return spec
 
 
