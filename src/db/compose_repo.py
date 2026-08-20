@@ -103,5 +103,8 @@ class ComposeRepo:
             clips = list(await cur.fetchall())
         head["reg_datetime"] = str(head.get("reg_datetime"))
         for c in clips:
-            c["start"], c["end"] = int(c["start"]), int(c["end"])
+            # TIME_TO_SEC 은 Decimal 을 준다 — float 로 통일한다(파이프라인 좌표=초).
+            # int() 로 내리면 안 된다: 컬럼이 time(3) 이라 밀리초가 살아 있고, 그
+            # 0.3초가 샷 경계를 가른다 (bounds._match 참조).
+            c["start"], c["end"] = float(c["start"]), float(c["end"])
         return {**head, "clips": clips}
