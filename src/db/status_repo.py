@@ -16,9 +16,11 @@ log = get_logger(__name__)
 COMPOSE_OK = 4000            # 전체 수행 완료 (색인 완료·편성/렌더 완주 공용 종결)
 COMPOSE_EMPTY = 4001         # 조건 부합 장면 없음 (빈 편성 정상 종결)
 COMPOSE_INGEST = 4010        # 증거 색인 중
-COMPOSE_PLAN = 4020          # 장면 선곡 중 (retrieve·plan·재선곡)
-COMPOSE_CUT = 4030           # 클립 구성 중 (cutrank·backfill·endfix)
-COMPOSE_VERIFY = 4040        # 편성 검수 중
+# 코드는 그래프 노드가 아니라 **국면**이다 — 노드가 늘어도 값은 그대로다.
+# 순서는 단조여야 한다: 되돌아가면 화면 진행이 뒤로 간다 (_NODE_CODE 참조).
+COMPOSE_PLAN = 4020          # 장면 선곡 (rephrase_query·retrieve_evidence·select_clips·retry_select)
+COMPOSE_CUT = 4030           # 구간 확정 (set_bounds·refine_bounds)
+COMPOSE_VERIFY = 4040        # 검수·확정 (score_match·drop_unmatched·order_clips·fill_budget)
 COMPOSE_RENDER = 4050        # mp4 렌더링 중
 COMPOSE_ERROR = 4900         # 편성 실패 (일반)
 COMPOSE_ERROR_SOURCE = 4910  # 발행본 없음 (publish 선행 필요)

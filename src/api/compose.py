@@ -40,11 +40,15 @@ router = APIRouter()
 _JOBS: dict[str, dict] = {}     # job_id → {status, v_id, query, result?, error?}
 _JOBS_MAX = 200                 # 오래된 완료 잡 정리 상한 (프로세스 수명 캐시)
 
-# 그래프 노드 → t_video 상태 코드 (UI 진행 표시 — 코드가 바뀌는 노드에서만 기록)
+# 그래프 노드 → t_video 상태 코드 (UI 진행 표시 — 코드가 바뀌는 노드에서만 기록).
+# **국면 순서대로 단조 증가해야 한다.** 구 표는 select(예산 확정)를 CUT(4030)에 걸어
+# verify(4040) 다음에 4030 으로 되돌아갔다 — 화면 진행이 뒤로 가는 값이었다.
+# 재배선으로 채점이 예산 확정보다 앞서면서 생긴 어긋남이라, 확정을 뒤 국면에 붙인다.
 _NODE_CODE = {"rephrase_query": COMPOSE_PLAN, "retrieve_evidence": COMPOSE_PLAN,
               "select_clips": COMPOSE_PLAN, "retry_select": COMPOSE_PLAN,
               "set_bounds": COMPOSE_CUT, "refine_bounds": COMPOSE_CUT,
-              "fill_budget": COMPOSE_CUT, "score_match": COMPOSE_VERIFY}
+              "score_match": COMPOSE_VERIFY, "drop_unmatched": COMPOSE_VERIFY,
+              "order_clips": COMPOSE_VERIFY, "fill_budget": COMPOSE_VERIFY}
 
 
 class ComposeRequest(BaseModel):

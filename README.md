@@ -5,8 +5,10 @@
 Milvus(`sm_scene_evidence`)에 색인한다.
 
 ```
-질의 → retrieve(벡터 검색) → plan(LLM 선곡) → cutrank(컷·예산 채움)
-     → [backfill(충원)] → endfix(LLM 끝 보정) → verify(LLM 검수 소견) → 저장
+질의 → rephrase_query(질의 재작성) → retrieve_evidence(벡터 검색)
+     → select_clips(LLM 선곡) → set_bounds(구간 확정, 규칙)
+     → refine_bounds(LLM 경계 보정) → score_match(LLM 채점)
+     → drop_unmatched → order_clips(LLM 순서) → fill_budget(예산 확정) → 저장
 ```
 
 - LLM은 **제안**만(선곡·끝 보정·소견), **처분은 결정적 코드**가 한다
@@ -80,10 +82,13 @@ curl -X POST localhost:8084/api/v1/compose \
 
 #### `GET /api/v1/compose/{job_id}` — 잡 폴링 (2~5초 간격 권장)
 
-진행 중 — `progress` 에 완료 노드가 순서대로 쌓인다:
+진행 중 — `progress` 에 완료 노드 이름이 순서대로 쌓인다. **노드명은 바뀔 수 있으니**
+화면에는 매핑한 문구를 쓰고, 미매핑 값은 원문 노출 대신 무시하는 쪽이 안전하다
+(2026-08-20 개편 실측: 두 UI 모두 옛 이름 표를 들고 있어 진행 표시가 죽어 있었다):
 
 ```json
-{"status": "running", "v_id": 202, "query": "...", "progress": ["retrieve", "plan"]}
+{"status": "running", "v_id": 202, "query": "...",
+ "progress": ["rephrase_query", "retrieve_evidence", "select_clips"]}
 ```
 
 완료 (`status`: `ok` | `empty` | `error`):

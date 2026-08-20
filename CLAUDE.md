@@ -79,3 +79,16 @@ deploy/update.sh --force    # 강제 재기동
   verify 재배치 **보류**(plan thinking 지배라 절감 <3%) · 진행 스트리밍 **적용**
   (checkpointer 없이 — astream 노드 완료를 job `progress` 필드로 노출, sm-api-01 배포됨).
   검증 e2e: v200 "홈런 모음" budget 60 → 홈런 1클립 59초, FULL_CLIP_TAGS 통째 컷+대사꼬리.
+- **노드 개편 (2026-08-20)** — 위 Phase 기록의 노드명(retrieve·plan·cutrank·backfill·
+  endfix·verify)은 **그 시점 이름**이다. 현재 그래프는 동사_목적어로 통일됐다:
+  `rephrase_query → retrieve_evidence → select_clips → set_bounds → refine_bounds
+  → score_match → drop_unmatched → order_clips → fill_budget` (분기 `retry_select`·
+  `end_empty`). 최신 흐름·노드표는 `.aidoc/compose-flow.md` §1.
+  구현(LLM 사용 여부·임계값)은 이름에 넣지 않는다 — 단계가 LLM↔규칙 사이를 오간다.
+  **노드명은 `GET /api/v1/compose/{job_id}` 의 `progress` 배열로 밖에 나간다.**
+  바꿀 때 두 UI 의 매핑표를 같이 고쳐야 한다 (ui-sbs-viwer `lib/server/compose-agent.ts`
+  NODE_LABEL · ui-workspace `components/compose/ComposeRequestForm.tsx` NODES).
+  안 고치면 진행 표시가 조용히 죽는다 — 실제로 두 곳 다 bench4 세대 이름으로
+  방치돼 체크가 영영 안 켜지고 내부 노드명이 화면에 노출되고 있었다.
+  t_video 상태 코드(4020·4030·4040)는 **국면**이라 값 불변이되, 매핑은 단조여야 한다
+  (`_NODE_CODE` — 구 표는 verify 뒤 select 가 4030 으로 되돌아갔다).

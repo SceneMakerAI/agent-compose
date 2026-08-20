@@ -3,39 +3,53 @@
 bench4 LangGraph flow 의 서비스 이식 설계. 결함 A1~A3·B4 수정을 포함하되,
 **판정 규칙·컷 레시피·프롬프트는 원문 이식**(등가 검증 가능 단위 유지)이 원칙.
 
-## 1. 그래프 (bench4 대비 재배선)
+## 1. 그래프 (2026-08-20 현재)
 
 ```
-START → retrieve → plan★ → cutrank → route ─┬→ backfill ─┐
-                    ▲                        ├────────────┼→ endfix★ → verify★ → END
-                    │                        │            │
-                    └── feedback ←───────────┤ (0건, 최대 1회)
-                                             └→ empty → END
+START → rephrase_query → retrieve_evidence → select_clips★ → set_bounds
+                              ▲                                   │
+                              │                    ┌──────────────┴──────────────┐
+                              └── retry_select ←───┤ (0건, 최대 MAX_REPLAN 회)   │
+                                       end_empty ←─┘ (소진)          refine_bounds★
+                                          │                                │
+                                          ▼                          score_match★
+                                         END                               │
+                                                                    drop_unmatched
+                                                                           │
+                                                                     order_clips★
+                                                                           │
+                                                                     fill_budget → END
 ```
 
-**bench4 와 다른 점 — endfix 를 route/backfill 뒤로 이동 (A1 수정).**
-구그래프(`cutrank → endfix → route → backfill`)에선 backfill 충원 클립이 LLM 끝보정을
-못 받아 경로별 품질이 불균일했다. 신그래프는 **발행될 클립 집합이 확정된 뒤** endfix 가
-한 번 돌므로 전 클립이 같은 보정을 받는다. LLM 콜 수는 동일(경로당 endfix 1회).
-의도된 의미 변화 1건: route 의 미달 판정(총길이 < 예산×0.7)이 bench4 는 endfix
-**연장 후** 총길이를 봤지만 신그래프는 **연장 전**을 본다 — endfix 는 연장만 하므로
-경계 케이스에서 bench4 보다 backfill 이 한 번 더 발동할 수 있다 (수정의 수용된 부수효과).
-검증: 2026-08-18 실 e2e(v201 수비 질의)에서 backfill 충원 클립(장면 70)의 끝 이동
-확인 — bench4 구조에선 불가능한 동작.
+★ = LLM 콜. happy path 는 5노드에서 콜이 나가고, refine_bounds·score_match 는
+**클립당 1콜을 동시에** 보낸다 (묶어 보내면 전송이 직렬이라 GPU 가 논다 — 실측 v201
+24클립 10분 26초 동안 서버 Running 1·KV 3%).
 
-| 노드 | LLM | 역할 (bench4 원문 이식 + 수정 표기) |
+노드 이름은 전부 **동사_목적어**이고 그 노드가 만들어 내는 것을 가리킨다. 구현(LLM
+사용 여부·임계값)은 이름에 넣지 않는다 — 이 파이프라인은 단계가 LLM↔규칙 사이를
+오간 전례가 있다(구 `drop0` 은 임계값이 바뀌면 거짓말이 되는 이름이었고, 구 `bounds`
+의 시작 판정은 `set_bounds` 규칙으로 내려왔다).
+
+| 노드 | LLM | 역할 |
 |---|---|---|
-| retrieve | — | 질의 임베딩(Embedder) → VectorStore 검색 → scene_id 그룹핑(히트수→유사도) 상위 8 + orphan 분리. **fail-open 폐기** — Milvus 예외는 전파(플로우 실패) |
-| plan | ★ thinking | 인벤토리+벡터 후보(+feedback) → 선곡 spec. 실존 scene_id 검산 통과분만. budget 인자는 질의 해석을 덮어씀 |
-| cutrank | — | rank 정렬 → 샷 레시피 컷 → greedy 예산 채움(picked/spare/total). **행 복사 후 수정 (B4)** |
-| route | — | 0건→feedback(1회)·소진→empty / 예산 70% 미달→backfill / 그 외→endfix |
-| backfill | — | plan 태그 범위 안 결정적 충원. **state.total 갱신 (A3)** |
-| feedback | — | 0건 전용 재선곡 사유 → plan 재진입 (비결정 재선곡은 폐기 유지 — bench4 확정) |
-| endfix | ★ | 전 채택 클립의 끝 근처 STT 발화 제시(검증기 수용 가능분만) → 제안 검증 후 처분 |
-| verify | ★ | 3층 증거 검수 — 기각권 없음(실측 확정). **의심 사유를 클립별 파싱 (A2)**: 응답 줄 형식 `클립N: 사유` 를 N별로 매핑, 매핑 실패 줄은 공통 소견으로 강등 |
-| empty | — | picked=[], status=empty |
+| rephrase_query | ★ | 질의를 중계의 언어로 다시 쓴다 + 메타 필터 힌트. 실패는 원 질의 폴백 (실측: 추상 질의 최고 유사도 0.58 vs 구체 질의 0.66~0.78) |
+| retrieve_evidence | — | 검색어별 임베딩 → VectorStore → scene_id 그룹핑 상위 8 + orphan. **fail-open 폐기** — Milvus 예외는 전파 |
+| select_clips | ★ thinking | 인벤토리+벡터 후보(+feedback) → 선곡 spec. 실존 scene_id 검산 통과분만. budget 인자가 질의 해석을 덮어씀 |
+| set_bounds | — | 샷 레시피로 구간 확정 + **필수 장면 회수**(선곡이 놓친 득점·역전 등). FULL_CLIP_TAGS 는 끝만 통째, 시작은 앵커 |
+| retry_select | — | 0건 전용 재선곡 사유 → select_clips 재진입 |
+| refine_bounds | ★ 클립당 | **앵커 없는 클립만** 경계 후보를 제시하고 고르게 한다. 시작 후보는 앞으로만 (되돌리는 방향은 전부 앞 플레이의 투구 — 5경기 29건 전수) |
+| score_match | ★ 클립당 | 질의 일치도 0~3 + 완결성. **기각권 없음** — 점수만 매긴다 |
+| drop_unmatched | — | 0점 제외 (필수 장면은 예외 — 사실이 소견을 이긴다) |
+| order_clips | ★ | 남은 후보를 질의에 맞는 순서로 줄 세운다. 담을지는 정하지 않는다 |
+| fill_budget | — | 층 순서로 예산만큼 담는다. **절단이 마지막**이라 총 길이가 정확하다 |
+| end_empty | — | picked=[], status=empty |
 
-LLM 콜: happy path 3회(plan+endfix+verify), 재선곡 시 4회, empty 2회. + 임베딩 1회.
+**절단이 마지막인 이유**: 예전에는 경계 확정 전에 잘랐고 그 뒤 끝 보정이 끝을 늘려
+예산 보장이 무효가 됐다 (실측: 900초 요청에 947~1018초).
+
+> 이 문서의 §3 이하와 `redesign.md`·`audit.md` 는 **bench4 이식 시점 기록**이라
+> 구 노드명(retrieve·plan·cutrank·route·backfill·endfix·verify)이 그대로 남아 있다.
+> 그때 무엇을 보고 무슨 판단을 했는지가 근거라 소급 수정하지 않는다.
 
 ## 2. State 불변 규약 (B4 수정 — 서비스 동시성의 전제)
 

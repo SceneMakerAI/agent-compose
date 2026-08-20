@@ -443,33 +443,6 @@ def _assemble(pool: list[dict], budget: int) -> tuple[list[dict], list[dict]]:
     return sorted(picked, key=lambda r: r["cut"]["cs"]), spare
 
 
-def _backfill(scenes, segs, utts, spec, picked: list[dict],
-              total: int) -> tuple[list[dict], int]:
-    """L2.5 결정적 충원 — plan 이 정한 대상 태그·라벨 부합 미선곡 장면을 rank 순으로.
-
-    관점=전체일 때만 (홈/원정 플레이 기계 판별 불가). 재선곡은 비결정적이라 폐기 —
-    마지막 채움은 사실 기반 계산 (bench4 실측). 반환에 total 포함 (A3 수정).
-    """
-    if spec["view"] != "전체" or not spec["targets"]:
-        return picked, total
-    have = {r["scene_id"] for r in picked}
-    tg = set(spec["targets"])
-    cands = [r for r in scenes if r["scene_id"] not in have
-             and (tg & set(r["tags"]) or tg & set(r["label_list"]))]
-    added = 0
-    for r in sorted(cands, key=lambda r: (-rank.score(r), r["s"])):
-        r = dict(r)                                    # 복사 후 수정 (B4)
-        r["cut"] = cut.clip(r, segs, utts)
-        d = r["cut"]["ce"] - r["cut"]["cs"]
-        if total + d <= spec["budget"]:
-            picked.append(r)
-            total += d
-            added += 1
-    if added:
-        log.info("예산 미달 충원: 대상 부합 %d장면 추가 → %ds", added, total)
-    return sorted(picked, key=lambda r: r["cut"]["cs"]), total
-
-
 # 패킷에 실을 샷 — 앞뒤를 나눠 잡는다. 앞에서 8개만 자르면 **마지막 샷이 사라지는데**
 # VERIFY_SYSTEM 이 "마지막 샷에 결과가 없으면 문제" 로 판정하라고 지시한다. 8샷 초과
 # 클립이 경기당 8~15건(최대 58샷)이라 전부 오판정 후보였다 (2026-08-20 사전 점검).
