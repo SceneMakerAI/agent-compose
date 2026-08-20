@@ -106,25 +106,31 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         return {"evidence": ev, "evidence_orphan": orphan}
 
     async def select_clips_node(st: ComposeState) -> dict:
+        """선곡 — 모델은 **번호만** 답한다. 명세(예산·대상)는 코드가 정한다.
+
+        예산을 모델에게 맡기던 배선을 걷었다 (2026-08-20): 몇 초를 담을지는 fill_budget
+        이 산술로 정하고, 대상 어휘는 rephrase_query 가 이미 질의에서 뽑아 둔 필터를
+        쓴다. 모델에게 남긴 판단은 "이 경기에서 질의에 맞는 장면이 어느 것인가" 하나다.
+        """
         inv = st["inv"]
-        # 호출자 예산을 LLM 에게도 알린다 — 기본값만 보내던 탓에 900s 요청에도 모델이
-        # "예산: 180" 으로 답하며 그 전제로 선곡했다 (2026-08-19 실측 로그).
-        budget = st.get("budget") or plan.DEFAULT_BUDGET_SEC
+        # 인벤토리는 요청당 1회 렌더가 원칙이나, 증거를 장면 블록에 병합하려면
+        # retrieve_evidence 결과가 필요해 여기서 다시 만든다 (순수 문자열 조립).
+        inventory = plan.render_inventory(list(inv.scenes), st.get("evidence", []))
         text = await llm.chat(
-            prompts.PLAN_SYSTEM.replace("{budget}", str(budget)),
-            prompts.plan_user(
-                st["query"], inv.game_line, inv.inventory_text, budget,
-                st.get("feedback", ""),
-                # orphan 은 프롬프트에서 뺀다 (선곡 불가라 자리만 차지)
-                plan.render_evidence(st.get("evidence", []), [], list(inv.scenes)),
-            ),
+            prompts.PLAN_SYSTEM,
+            prompts.plan_user(st["query"], inv.game_line, inventory, st.get("feedback", "")),
             thinking=True, trace=st.get("trace"), name="select_clips",
         )
         log.info("select_clips 응답: %r", text)
-        spec = plan.parse(text, list(inv.scenes))
-        if st.get("budget"):
-            spec["budget"] = st["budget"]      # 명시 입력이 질의 해석보다 우선
-        spec["picked"] = list(dict.fromkeys(spec["picked"]))   # 중복 선곡 제거
+        spec = {
+            "mode": "compose",
+            # 대상 어휘는 rephrase_query 의 메타 필터 — 필수 장면 회수 범위를 가른다.
+            "targets": list(st.get("filters") or []),
+            "view": "전체",
+            "budget": st.get("budget") or plan.DEFAULT_BUDGET_SEC,
+            "picked": plan.parse_picked(text, list(inv.scenes)),
+            "raw": text,
+        }
         log.info("select_clips: %s 선곡 %s", plan.spec_line(spec), spec["picked"])
         if tr := st.get("trace"):
             tr.node("select_clips", spec={k: v for k, v in spec.items() if k != "raw"})

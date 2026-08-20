@@ -27,7 +27,6 @@ from db.status_repo import (
     COMPOSE_RENDER,
     COMPOSE_VERIFY,
 )
-from flow import plan as plan_mod
 from flow import players
 from flow.graph import run_compose
 from flow.state import Inventory
@@ -133,7 +132,6 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
     inv = Inventory(
         v_id=req.v_id, scenes=tuple(scenes), segs=tuple(segs), utts=utts,
         game_line=f"v_id={req.v_id}  {parts[0]}(원정) vs {parts[2]}(홈)",
-        inventory_text=plan_mod.render_inventory(scenes),
         pitches=tuple(await repo.fetch_pitch_windows(req.v_id)),  # refine_bounds 후보 재료
         trans=tuple(await repo.fetch_transitions(req.v_id)),  # score_match 사실 근거
     )

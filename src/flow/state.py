@@ -24,7 +24,6 @@ class Inventory:
     segs: tuple[dict, ...]                    # scene-cut 샷 (s·e·shot_type)
     utts: tuple[tuple[float, float, str], ...]  # STT (s, e, text) 시간순
     game_line: str                            # "v_id=201  삼성(원정) vs 롯데(홈)"
-    inventory_text: str                       # select_clips 가 보는 목록 렌더 (요청당 1회)
     pitches: tuple = ()                       # 보드 검출 투구 전량 — refine_bounds 재료
     trans: tuple[dict, ...] = ()              # 전광판 전이 — score_match 가 구간별로 골라 쓴다
 

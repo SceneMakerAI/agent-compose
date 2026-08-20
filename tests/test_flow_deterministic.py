@@ -226,36 +226,31 @@ def test_vocab_validate():
 
 # ── 프롬프트 byte 등가 (compose-flow.md §5-1 게이트) ───
 
-def test_prompt_renders_still_equal_bench4(bench4):
-    """**렌더 함수**는 bench4 와 byte 등가 — 구조가 갈리면 여기서 걸린다.
 
-    system 문구(PLAN·ENDFIX·BOUNDS·RANK·VERIFY)는 등가 대상에서 뺐다 (2026-08-20).
-    이식 검증용 게이트였는데 지금은 운영하며 계속 손보는 대상이라, 문구를 고칠 때마다
-    bench4 원문을 같이 고쳐야 하는 역전이 생긴다. 문구가 아니라 **재료 조립**이
-    안 틀어졌는지가 이 테스트의 관심사다.
+def test_plan_user_carries_query_and_inventory():
+    """select_clips 유저 프롬프트 조립 — 경기·인벤토리·질의가 제자리에 실린다.
+
+    bench4 byte 등가 게이트였던 자리다 (2026-08-20 폐기): 프롬프트가 줄 형식 명세에서
+    **번호만 답하는** 형식으로 바뀌면서 원본과 구조가 갈렸다. 이식 검증은 끝났고
+    지금 지켜야 하는 건 "재료가 빠지지 않는가" 다.
     """
-    spec = importlib.util.spec_from_file_location("b4_prompt", _BENCH4 / "compose" / "prompt.py")
-    b4p = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(b4p)
     from flow import prompts
 
-    # user 프롬프트 렌더 — 인벤토리 헤더에 타자 열이 붙은 것만 다르다
-    u_ours = prompts.plan_user("q", "g", "inv", 180, "fb", "ev").splitlines()
-    u_theirs = b4p.plan_user("q", "g", "inv", 180, "fb", "ev").splitlines()
-    u_diff = [(a, b) for a, b in zip(u_theirs, u_ours) if a != b]
-    assert len(u_ours) == len(u_theirs)
-    assert [b for _, b in u_diff] == ["번호  태그  라벨  이닝  상황(아웃·주자)  점수(전→후)  타자  길이"]
+    u = prompts.plan_user("홈런 모음", "v_id=203 KT(원정) vs NC(홈)", "[장면 1]\n- 태그: 홈런")
+    assert "[경기 정보]\nv_id=203 KT(원정) vs NC(홈)" in u
+    assert "[인벤토리]" in u and "[장면 1]" in u
+    assert u.rstrip().endswith("[질의]\n홈런 모음")
+    assert "[이전 시도 피드백]" not in u              # 피드백 없으면 블록째 빠진다
+    assert "[이전 시도 피드백]\n다시" in prompts.plan_user("q", "g", "inv", "다시")
 
 
-def test_plan_system_keeps_vocab_and_budget_rule():
-    """문구는 자유롭게 고치되 이 둘은 남아야 한다 — 어휘 렌더와 분량 규칙.
+def test_plan_system_keeps_vocab():
+    """문구는 자유롭게 고치되 어휘 렌더는 남아야 한다.
 
-    어휘를 하드코딩하면 vision3 에 태그가 늘어도 프롬프트만 옛 어휘로 남는다(보크 실측).
-    분량 규칙이 빠지면 plan 이 예산만큼만 골라 select 가 고를 재료가 없어진다.
+    하드코딩하면 vision3 에 태그가 늘어도 프롬프트만 옛 어휘로 남는다(보크 실측).
     """
     from flow import prompts
 
     assert f"- 태그: {prompts.TAG_VOCAB}" in prompts.PLAN_SYSTEM
     assert f"- 라벨: {prompts.LABEL_VOCAB}" in prompts.PLAN_SYSTEM
-    assert "2배" in prompts.PLAN_SYSTEM
-    assert "{budget}" in prompts.PLAN_SYSTEM      # 호출부가 채우는 자리 — 없어지면 예산이 안 간다
+    assert "{budget}" not in prompts.PLAN_SYSTEM     # 예산은 프롬프트로 가지 않는다

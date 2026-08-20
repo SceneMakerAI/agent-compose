@@ -43,7 +43,7 @@ SEGS = ({"seg_id": 1, "s": 100.0, "e": 106.0, "shot_type": "투구"},
         {"seg_id": 3, "s": 200.0, "e": 206.0, "shot_type": "투구"},
         {"seg_id": 4, "s": 206.0, "e": 214.0, "shot_type": "타구·수비"})
 INV = Inventory(v_id=999, scenes=SCENES, segs=SEGS, utts=(),
-                game_line="v_id=999 삼성(원정) vs 롯데(홈)", inventory_text="(목록)")
+                game_line="v_id=999 삼성(원정) vs 롯데(홈)")
 
 PLAN_OK = "모드: collection\n대상: 안타\n관점: 전체\n예산: 60\n선곡: 1, 2\n사유: 테스트"
 PLAN_EMPTY = "모드: collection\n대상: 홈런\n관점: 전체\n예산: 60\n선곡: 없음\n사유: 없음"
@@ -74,7 +74,7 @@ async def test_must_scene_recovered_when_select_clips_misses_it():
     scenes = (scene(1, 100, 130, pitch=102),
               scene(2, 200, 240, tags="안타", labels="역전,적시타", delta=1, pitch=202))
     inv = Inventory(v_id=999, scenes=scenes, segs=SEGS, utts=(),
-                    game_line="g", inventory_text="(목록)")
+                    game_line="g")
     plan_one = "모드: collection\n대상: 안타, 역전\n관점: 전체\n예산: 300\n선곡: 1\n사유: 2번 누락"
     g = build_graph(StubLLM(select_clips=plan_one), StubEmb(), StubStore())
     st = await run_compose(g, inv, "안타 모음", 300)
@@ -91,7 +91,7 @@ async def test_pinpoint_does_not_recover():
     scenes = (scene(1, 100, 130, tags="안타", labels="역전", delta=1, pitch=102),
               scene(2, 200, 240, tags="안타", labels="적시타", delta=2, pitch=202))
     inv = Inventory(v_id=999, scenes=scenes, segs=SEGS, utts=(),
-                    game_line="g", inventory_text="(목록)")
+                    game_line="g")
     plan_one = "모드: pinpoint\n대상: 역전\n관점: 전체\n예산: 300\n선곡: 1\n사유: 역전만"
     g = build_graph(StubLLM(select_clips=plan_one), StubEmb(), StubStore())
     st = await run_compose(g, inv, "역전 장면만", 300)
@@ -103,7 +103,7 @@ async def test_score_match_drives_drop_not_removal():
     scenes = (scene(1, 100, 130, tags="범타"),
               scene(2, 200, 240, tags="안타", labels="역전", delta=1, pitch=202))
     inv = Inventory(v_id=999, scenes=scenes, segs=SEGS, utts=(),
-                    game_line="g", inventory_text="(목록)")
+                    game_line="g")
     plan_two = "모드: collection\n대상: 안타\n관점: 전체\n예산: 300\n선곡: 1, 2\n사유: t"
     zero_both = "장면 1: 0 정상 무관\n장면 2: 0 정상 무관"
     g = build_graph(StubLLM(select_clips=plan_two, score_match=zero_both), StubEmb(), StubStore())
@@ -156,7 +156,7 @@ async def test_refine_bounds_and_score_match_fan_out_per_clip():
     inv = Inventory(v_id=999, scenes=scenes, segs=segs,
                     utts=((108.0, 112.0, "던집니다"), (118.0, 124.0, "넘어갑니다"),
                           (208.0, 212.0, "던집니다"), (212.0, 218.0, "잡아냅니다")),
-                    game_line="g", inventory_text="(목록)",
+                    game_line="g",
                     pitches=((110, 111), (210, 211)))
     llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), StubStore())
@@ -169,30 +169,43 @@ async def test_refine_bounds_and_score_match_fan_out_per_clip():
     assert "[질의] 안타 모음" in user            # 질의가 실려야 채점 기준이 선다
 
 
-async def test_caller_budget_reaches_select_clips_prompt():
-    """호출자 예산이 select_clips 프롬프트에 실제로 실린다.
+async def test_caller_budget_reaches_spec():
+    """호출자 예산이 spec 에 그대로 실린다.
 
-    기본값(180)만 보내던 배선 탓에 900s 요청에도 모델이 "예산: 180"으로 답하며 그
-    전제로 선곡했다 (2026-08-19 실측). 프롬프트 문자열까지 확인해야 잡히는 종류라
-    응답 파싱이 아니라 송신 내용을 본다.
+    예산은 더 이상 프롬프트로 가지 않는다 (2026-08-20) — 모델이 "예산: 180"으로
+    답하며 그 전제로 선곡하던 배선을 걷었다. 지금 지켜야 하는 건 fill_budget 이
+    쓰는 값이 호출자 값과 같은가다.
     """
     llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), StubStore())
-    await run_compose(g, INV, "안타 모음", 900)
-    plan_system, _ = llm.prompt_of("select_clips")
-    assert "900" in plan_system
-    assert "{budget}" not in plan_system            # 치환 누락 방지
-    assert str(180) not in plan_system.split("예산(초)이")[1][:80]   # 기본값 잔존 금지
+    st = await run_compose(g, INV, "안타 모음", 900)
+    assert st["spec"]["budget"] == 900
+    plan_system, user = llm.prompt_of("select_clips")
+    assert "900" not in plan_system and "예산" not in user   # 프롬프트엔 싣지 않는다
 
 
 async def test_budget_omitted_falls_back_to_default():
-    """예산 미지정이면 기본값이 그대로 프롬프트에 실린다."""
+    """예산 미지정이면 기본값이 spec 에 들어간다."""
     from flow import plan as plan_mod
 
+    g = build_graph(StubLLM(), StubEmb(), StubStore())
+    st = await run_compose(g, INV, "안타 모음", None)
+    assert st["spec"]["budget"] == plan_mod.DEFAULT_BUDGET_SEC
+
+
+async def test_evidence_is_merged_into_scene_block():
+    """검색 증거가 그 장면 블록 안에 실린다 — 번호로만 잇던 조인을 없앴다."""
+    class EvStore:
+        async def search(self, qv, v_id, extra=None):
+            return [{"scene_id": 1, "kind": "shot", "text": "외야수가 담장 앞에서 잡는다",
+                     "distance": 0.7, "s": 100.0}]
+
     llm = CapturingLLM()
-    g = build_graph(llm, StubEmb(), StubStore())
-    await run_compose(g, INV, "안타 모음", None)
-    assert str(plan_mod.DEFAULT_BUDGET_SEC) in llm.prompt_of("select_clips")[0]
+    g = build_graph(llm, StubEmb(), EvStore())
+    await run_compose(g, INV, "호수비 모음", 300)
+    _sys, user = llm.prompt_of("select_clips")
+    block = user.split("[장면 1]")[1].split("[장면 2]")[0]
+    assert "- 검색증거:" in block and "[화면] 외야수가 담장 앞에서 잡는다" in block
 
 
 # ── 인벤토리 상황 렌더 ─────────────────────────────────
@@ -216,9 +229,10 @@ def test_render_inventory_carries_situation_and_team():
     rows = [{"scene_id": 65, "scene_type": "범타", "labels": "", "inning": "8회 말",
              "score": "삼성 9-7 롯데", "score_before": "9-7", "s": 100.0, "e": 114.0,
              "outs": 0, "bases": "100", "away_team": "삼성", "home_team": "롯데"}]
-    line = render_inventory(rows)
-    assert "0사 1루" in line
-    assert "삼성 9-7→9-7" in line
+    block = render_inventory(rows)
+    assert "- 아웃: 0" in block and "- 주자: 1루" in block
+    assert "- 점수상황: 9-7 -> 9-7" in block
+    assert "[장면 65]" in block
 
 
 def test_render_inventory_survives_missing_transition():

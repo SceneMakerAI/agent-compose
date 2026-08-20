@@ -36,87 +36,76 @@ def render_situation(outs: int | None, bases: str | None) -> str:
     return f"{outs}사 {runners}"
 
 
-def render_inventory(scenes: list[dict]) -> str:
-    """t_scene_baseball 행 → select_clips 가 보는 목록 한 줄씩 (경기 단위라 전 행 — 2~3KB).
+def render_bases(bases: str | None) -> str:
+    """주자 비트('110') → '1루·2루' / '만루' / '주자없음'. 값이 없으면 '?'."""
+    if bases is None:
+        return "?"
+    on = [n for n, b in zip(("1루", "2루", "3루"), str(bases)) if b == "1"]
+    if len(on) == 3:
+        return "만루"
+    return "·".join(on) if on else "주자없음"
 
-    점수에 원정팀명을 붙인다 — 가운데 토막만 떼면(`9-7`) 모델이 매 행마다
-    초/말 → 원정/홈 → 팀명 → 어느 쪽이 올랐나를 3단 추론해야 한다.
+
+def render_inventory(scenes: list[dict], evidence: list[dict] | None = None) -> str:
+    """t_scene_baseball 행 → select_clips 가 보는 장면 블록들 (경기 단위라 전 행).
+
+    한 줄 표에서 **장면당 블록**으로 바꿨다 (2026-08-20). 열 정렬에 기대면 값이 빈
+    항목도 자리를 차지하고, 어느 열이 무엇인지 모델이 헤더를 기억해야 한다. 항목마다
+    이름을 달면 없는 값은 줄째로 빠진다.
+
+    **검색 증거를 그 장면 블록 안에 병합**한다. 예전에는 별도 [벡터 후보] 블록이라
+    인벤토리와 번호로만 이어져 조인이 모델 몫이었다.
     """
-    lines = []
+    by_scene = {g["scene_id"]: g for g in (evidence or [])}
+    out: list[str] = []
     for r in scenes:
         before = r["score_before"] or "?"
         cur = r["score"].split()[1] if r["score"] else "?"
-        away = r.get("away_team") or ""
-        score = f"{away} {before}→{cur}" if away else f"{before}→{cur}"
-        sit = render_situation(r.get("outs"), r.get("bases"))
-        lines.append(
-            f"{r['scene_id']:3d}  {r['scene_type']:14s} {r['labels'] or '-':10s} "
-            f"{r['inning'] or '?':7s} {sit:12s} {score:18s} {r.get('batter') or '-':6s}"
-            f"  {r['e'] - r['s']:.0f}s")
-    return "\n".join(lines)
+        outs = r.get("outs")
+        lines = [f"[장면 {r['scene_id']}]",
+                 f"- 이닝: {r['inning'] or '?'}",
+                 f"- 아웃: {outs if outs is not None else '?'}",
+                 f"- 주자: {render_bases(r.get('bases'))}",
+                 f"- 태그: {r['scene_type']}"]
+        if r.get("labels"):
+            lines.append(f"- 라벨: {r['labels']}")
+        lines.append(f"- 점수상황: {before} -> {cur}")
+        lines.append(f"- 영상길이: {r['e'] - r['s']:.0f}s")
+        if r.get("batter"):
+            lines.append(f"- 기타정보: {r['batter']}")
+        if g := by_scene.get(r["scene_id"]):
+            snips = [f"  * [{KIND_LABEL.get(k, k)}] {t[:EVIDENCE_TEXT_MAX]}"
+                     for k, texts in sorted(g.get("by_kind", {}).items())
+                     for t in texts[:EVIDENCE_SNIPPETS_MAX]]
+            if snips:
+                lines.append("- 검색증거:")
+                lines += snips
+        out.append("\n".join(lines))
+    return "\n\n".join(out)
 
 
 KIND_LABEL = {"stt": "해설", "shot": "화면", "etc": "자막"}
 EVIDENCE_TEXT_MAX = 70          # 스니펫 표기 길이 (문장 중간 절단은 감수 — 전문은 색인에)
+EVIDENCE_SNIPPETS_MAX = 2       # 장면·종류당 스니펫 수
 
 
-def render_evidence(evidence: list[dict], orphan: list[dict],
-                    scenes: list[dict] | None = None) -> str:
-    """retrieve_evidence 결과 → select_clips 가 보는 벡터 후보 섹션. 비면 빈 문자열.
-
-    증거마다 **종류(해설·화면·자막)를 붙이고 종류별로 한 줄씩** 낸다. 종류를 지우면
-    모델이 "이게 사람이 한 말인지 화면 설명인지" 를 모르는데, system 프롬프트는
-    증거가 태그를 넘어설 권한을 준다 — 무엇을 믿을지 정하려면 출처를 알아야 한다.
-
-    scenes 를 주면 태그·이닝·점수를 같은 줄에 붙인다. 인벤토리와 이 블록이 번호로만
-    이어져 있어 조인이 모델 몫이던 문제(audit) 대응.
+def parse_picked(text: str, scenes: list[dict]) -> list[int]:
     """
-    if not evidence and not orphan:
-        return ""
-    meta = {r["scene_id"]: r for r in (scenes or [])}
-    lines = ["[벡터 후보 — 질의와 의미가 가까운 검색 증거 (참고)]"]
-    for g in evidence:
-        m = meta.get(g["scene_id"])
-        head = f"장면 {g['scene_id']}  유사도 {g['sim']:.2f}"
-        if m:
-            away = (m.get("score") or " ").split()
-            head += (f"  {m['scene_type']}"
-                     + (f"·{m['labels']}" if m.get("labels") else "")
-                     + f"  {m['inning']}"
-                     + (f"  {away[0]} {m['score_before']}→{away[1]}" if len(away) > 1 else ""))
-        lines.append(head)
-        for kind, texts in sorted(g.get("by_kind", {}).items()):
-            lines.append(f"   {KIND_LABEL.get(kind, kind)} "
-                         + " / ".join(f"\"{t[:EVIDENCE_TEXT_MAX]}\"" for t in texts[:2]))
-    for o in orphan:
-        lines.append(f"※ 장면 밖 {int(o['s'])}s: \"{o['text'][:60]}\" — 발행 장면 없음 (선곡 불가)")
-    return "\n".join(lines)
-
-
-def parse(text: str, scenes: list[dict]) -> dict:
-    """LLM 응답(줄 형식) → 명세 dict. 선곡은 실존 scene_id 로 검산(select)."""
-    spec = {"mode": "compose", "targets": [], "view": "전체",
-            "budget": DEFAULT_BUDGET_SEC, "picked": [], "raw": text}
+    Summary:
+        select_clips 응답(번호 나열) → 실존 scene_id 목록.
+    Description:
+        - 응답 형식이 "5,26,46,59" 로 좁혀졌다 (2026-08-20). 명세(모드·대상·관점·예산)를
+          함께 받던 줄 형식은 폐기 — 그 값들은 코드가 정한다.
+        - **실존 검산은 여기 남는다**: 목록에 없는 번호를 지어내면 조용히 버리고 로그로
+          드러낸다(사실이 모델을 이긴다).
+        - 중복은 제거하고 등장 순서를 유지한다.
+    """
     known = {r["scene_id"] for r in scenes}
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("모드:"):
-            m = re.search(r"pinpoint|collection|compose", line)
-            spec["mode"] = m.group(0) if m else "compose"
-        elif line.startswith("대상:"):
-            spec["targets"] = [t.strip() for t in line[3:].split(",") if t.strip()]
-        elif line.startswith("관점:"):
-            spec["view"] = ("홈" if "홈" in line else "원정" if "원정" in line else "전체")
-        elif line.startswith("예산:"):
-            m = re.search(r"\d+", line)
-            if m:
-                spec["budget"] = int(m.group(0))
-        elif line.startswith("선곡:"):
-            ids = [int(x) for x in re.findall(r"\d+", line)]
-            spec["picked"] = [i for i in ids if i in known]        # select: 사실 검산
-            if ghost := [i for i in ids if i not in known]:
-                log.warning("선곡 검산: 실존하지 않는 장면 제거 %s", ghost)
-    return spec
+    ids = [int(x) for x in re.findall(r"\d+", text)]
+    picked = list(dict.fromkeys(i for i in ids if i in known))
+    if ghost := sorted({i for i in ids if i not in known}):
+        log.warning("선곡 검산: 실존하지 않는 장면 제거 %s", ghost)
+    return picked
 
 
 def spec_line(spec: dict) -> str:
