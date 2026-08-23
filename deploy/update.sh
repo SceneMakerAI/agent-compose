@@ -49,7 +49,14 @@ fi
 sudo systemctl restart "$SERVICE"
 
 # 헬스 확인 — readyz(DB+embed+Milvus)까지 최대 30초 대기
-PORT=$(grep -E '^APP_PORT=' "$APP_DIR/.env" | cut -d= -f2 | awk '{print $1}')
+# .env 는 소유자 전용(agent:agent 600)이라 실행 계정(ec2-user)으로는 못 읽는다 —
+# 소유자로 읽는다. 실측 2026-08-24(sm-pub-01): 이 줄이 Permission denied 로 죽어
+# set -e 가 스크립트를 끊었다. 재기동은 이미 끝난 뒤라 서비스는 정상인데 배포는
+# 실패로 보이는, 가장 헷갈리는 실패 방식이었다.
+# 실패해도 배포 전체를 죽이지 않는다(|| true) — 포트는 기본값으로 확인하면 된다.
+# ${PORT:-8084} 만으로는 부족하다: pipefail 이라 grep 실패가 대입 자체를 실패시켜
+# 폴백에 닿지 못한다.
+PORT=$(as_owner grep -E '^APP_PORT=' "$APP_DIR/.env" 2>/dev/null | cut -d= -f2 | awk '{print $1}' || true)
 PORT=${PORT:-8084}
 for _ in $(seq 1 30); do
     if curl -sf "http://127.0.0.1:${PORT}/readyz" >/dev/null; then
