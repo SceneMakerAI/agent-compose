@@ -92,11 +92,12 @@ def test_apply_rejects_values_outside_candidates():
 
 
 def test_apply_moves_when_candidate_matches():
+    """시작도 **후보 번호**로 받는다 (2026-08-24 형식 통일 — 끝과 같은 규칙)."""
     c = clip(cs=100.0, ce=160.0)
     rows = bounds.start_rows([c], SEGS, UTTS, [])
-    start = int(rows[0]["cands"][0]["sec"])
-    moved = bounds.apply_start([c], rows, f"{start}s")
-    assert c["cut"]["cs"] == float(start) and moved
+    want = rows[0]["cands"][0]["sec"]
+    moved = bounds.apply_start([c], rows, "1")
+    assert c["cut"]["cs"] == want and moved
 
 
 def test_start_rows_gate_by_anchor_shot_type():
@@ -132,7 +133,7 @@ def test_apply_keeps_candidate_fraction():
     c = clip(cs=100.0, ce=140.0)
     rows = bounds.start_rows([c], segs, UTTS, [])
     assert rows[0]["cands"][0]["sec"] == 108.3       # 후보는 소수를 그대로 들고 있다
-    bounds.apply_start([c], rows, "108s")
+    bounds.apply_start([c], rows, "1")               # 번호 → 소수 초로 치환
     assert c["cut"]["cs"] == 108.3
 
 
@@ -178,17 +179,26 @@ def test_start_rows_carries_current_shot():
     assert rows[0]["cur"]["shot"] == "투수가 공을 던진다"
 
 
-def test_start_user_lists_window_and_choices():
-    """구간의 대사·화면을 통째로 주고, 후보는 질문 줄에 초 값으로 나열한다."""
+def test_start_user_matches_end_prompt_shape():
+    """시작 프롬프트 뼈대가 끝과 같다 — 머리줄·현재·번호 붙은 후보·[질문] 한 줄.
+
+    두 노드가 하는 일이 "제시된 지점 중 고르기"로 같은데 형식이 달라 규칙과 파서를
+    따로 들고 있었다 (2026-08-24 통일).
+
+    구간의 대사·화면 블록은 남는다: 시작 후보는 보드 검출 투구라 그 초의 화면 분류가
+    비어 있는 경우가 많아(v203 실측 81% NULL) 후보 줄만으로는 구별이 안 된다.
+    """
     from flow.prompts import start_user
 
     utts = [(104.0, 112.0, "던집니다"), *UTTS]
     rows = bounds.start_rows([clip(cs=100.0, ce=160.0)], SEGS, utts, [(112, 113)])
     text = start_user(rows)
-    assert "[현재 장면] 100s" in text
-    assert "[대사]" in text and "[화면]" in text
-    assert "[질문] 현재(100s)의 투구 플레이가 시작되는 올바른 시각을 고르세요:" in text
-    assert "112s / 유지" in text
+    assert text.startswith("■ 장면 1 [홈런]")
+    assert "현재 00:01:40~00:02:40" in text              # hh:mm:ss 표기
+    assert "  현재 시작 00:01:40" in text
+    assert "  1) 시작후보 " in text
+    assert "[구간 대사]" in text and "[구간 화면]" in text
+    assert text.rstrip().endswith("[질문] 시작을 어디로 할까?")
 
 
 def test_apply_start_keeps_when_model_says_stay():
@@ -236,28 +246,27 @@ def test_end_rows_drop_speech_candidate_identical_to_current():
     assert bounds.end_rows([clip(cs=100.0, ce=130.0)], segs, utts) == []
 
 
-def test_end_rows_keep_shot_boundary_even_if_description_matches():
-    """샷 경계 후보는 설명이 현재와 같아도 남는다 — 샷 스냅이 곧 그 선택이다.
+def test_end_rows_drop_shot_boundary_identical_to_current():
+    """샷 경계 후보도 설명이 현재와 똑같으면 뺀다 — 종류를 안 가린다 (2026-08-24).
 
-    현재 끝(130s)이 샷 한복판이라 그 샷의 끝(133s)은 같은 샷이라서 화면·해설이 당연히
-    같다. 그런데도 "샷을 끝까지 보고 자른다"는 다른 선택이고, 후보 줄의 '화면 전환'
-    표기가 그 차이를 보여 준다. 서명으로 지우면 이 설계의 핵심이 사라진다.
+    현재 끝(130s)이 샷 한복판이라 그 샷의 끝(133s)은 같은 샷이라서 화면·해설이 같다.
+    한때는 "샷을 끝까지 보고 자른다"가 다른 선택이라 남겼는데, 실측이 그 걱정을
+    지웠다: 4회 실행 78콜에서 그런 후보는 4건뿐이고 전부 다른 후보와 함께 나왔다.
+    남겨 봐야 고를 근거가 프롬프트 안에 없는 선택지만 하나 느는 것이다.
     """
     segs = [{"s": 120.0, "e": 133.0, "shot_type": "리액션", "summary": "같은 화면"},
             {"s": 133.0, "e": 136.0, "shot_type": "타구·수비", "summary": "다른 화면"}]
-    utts = [(120.0, 136.0, "같은 해설")]
+    utts = [(120.0, 133.5, "같은 해설"), (133.5, 136.0, "다른 해설")]
     ends = bounds.end_rows([clip(cs=100.0, ce=130.0)], segs, utts)[0]["ends"]
-    assert [int(e["sec"]) for e in ends] == [133, 136]
-    assert ends[0]["shot"] == "같은 화면" and ends[0]["why"] == "화면 전환"
+    assert [int(e["sec"]) for e in ends] == [136]        # 133 은 현재와 구별 안 돼 빠짐
 
 
-def test_end_rows_fold_candidates_sharing_a_signature():
-    """후보끼리 화면·해설이 같으면 하나로 접는다 — 고를 근거가 프롬프트 안에 없다."""
+def test_end_rows_skip_clip_when_nothing_left_to_ask():
+    """후보가 전부 빠지면 그 클립은 행에서 빠진다 — 물어볼 게 없으면 안 묻는다."""
     segs = [{"s": 120.0, "e": 133.0, "shot_type": "리액션", "summary": "같은 화면"},
             {"s": 133.0, "e": 136.0, "shot_type": "리액션", "summary": "같은 화면"}]
     utts = [(120.0, 136.0, "같은 해설")]
-    got = bounds.end_rows([clip(cs=100.0, ce=130.0)], segs, utts)
-    assert [int(e["sec"]) for e in got[0]["ends"]] == [133]
+    assert bounds.end_rows([clip(cs=100.0, ce=130.0)], segs, utts) == []
 
 
 # ── 처분 파서 — 응답 형식 (끝=번호 / 시작=초) ───────────
@@ -298,12 +307,12 @@ def test_apply_end_rejects_hold_unknown_and_offlist_index():
         assert clips[0]["cut"]["mode"] == "레시피"
 
 
-def test_apply_start_still_takes_seconds():
-    """시작은 아직 초 값으로 받는다 — 끝만 번호로 바꿨다 (대상 0건이라 미검증).
-
-    단위 표기는 붙든 안 붙든 받는다 (Qwen3.8 "9303s" / Qwen3.6 "1355초" 실측).
-    """
-    for text in ("6690s", "6690초", "6690"):
+def test_apply_start_takes_candidate_index_like_end():
+    """시작도 번호로 받는다 — 끝과 같은 파서·같은 기각 규칙."""
+    clips = [_clip()]
+    assert bounds.apply_start(clips, [ROW], "1") == ["장면47 시작 6696.0→6690.3"]
+    assert clips[0]["cut"]["cs"] == 6690.3
+    for text in ("유지", "2", "0", "6690s"):          # 목록 밖 번호·초 표기는 기각
         clips = [_clip()]
-        assert bounds.apply_start(clips, [ROW], text) == ["장면47 시작 6696.0→6690.3"]
-        assert clips[0]["cut"]["cs"] == 6690.3
+        assert bounds.apply_start(clips, [ROW], text) == []
+        assert clips[0]["cut"]["cs"] == 6696.0

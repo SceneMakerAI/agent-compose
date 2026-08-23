@@ -164,44 +164,12 @@ START_SYSTEM = """\
    - 적절한 후보가 없거나 모두 부적절하면 "유지"를 선택한다.
 
 [RULES]
-- 반드시 제시된 후보의 초 값 중 하나 또는 "유지"만 출력한다.
-- 임의의 초를 지어내거나 이유 설명 등 다른 말을 절대 붙이지 않는다.
+- 반드시 제시된 후보의 번호 중 하나 또는 "유지"만 출력한다.
+- 시각이나 이유 설명 등 다른 말을 절대 붙이지 않는다.
 
-[OUTPUT 예시]
-2346s\
+[OUTPUT — 번호 하나 또는 "유지", 다른 말 금지]
+2\
 """
-
-
-def start_user(rows: list[dict]) -> str:
-    """bounds.start_rows() 산출 → 시작 후보 프롬프트 (클립 1건 = 콜 1건).
-
-    후보마다 한 줄씩 붙이는 대신 **후보~현재 구간의 대사·화면을 통째로** 준다:
-    후보 시각의 화면 분류가 NULL 이면(v203 실측 81%) 붙일 게 없어 후보끼리 구별되지
-    않았다. 구간을 통으로 주면 "그 사이에 무슨 일이 있었나"로 판별할 수 있다.
-    """
-    r = rows[0]
-    cur = r["cur"]
-    lines = [f"■ 장면 {r['scene_id']} [{','.join(r['tags'])}]"
-             + (f" {r['inning']}" if r.get("inning") else ""),
-             f"[현재 장면] {r['cs']:.0f}s"]
-    if cur.get("shot") or cur.get("shot_type"):
-        lines.append(f" - 화면 : [{cur.get('shot_type') or '미분류'}] "
-                     f"{cur.get('shot') or '(설명 없음)'}")
-    if cur.get("utt"):
-        lines.append(f" - 해설 : \"{cur['utt']}\"")
-    if r["utts"]:
-        lines.append("")
-        lines.append("[대사]")
-        lines += [f" - {us:.0f}s ~ {ue:.0f}s : \"{t}\"" for us, ue, t in r["utts"]]
-    if r["shots"]:
-        lines.append("")
-        lines.append("[화면]")
-        lines += [f" - {x['s']:.0f}s : [{x.get('shot_type') or '미분류'}] "
-                  f"{x.get('summary') or '(설명 없음)'}" for x in r["shots"]]
-    picks = " / ".join(f"{c['sec']:.0f}s" for c in r["cands"]) + " / 유지"
-    lines += ["",
-              f"[질문] 현재({r['cs']:.0f}s)의 투구 플레이가 시작되는 올바른 시각을 고르세요: {picks}"]
-    return "\n".join(lines)
 
 
 def hms(sec: float) -> str:
@@ -215,6 +183,32 @@ def hms(sec: float) -> str:
     h, rem = divmod(int(sec), 3600)
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def start_user(rows: list[dict]) -> str:
+    """bounds.start_rows() 산출 → 시작 후보 프롬프트 (클립 1건 = 콜 1건).
+
+    뼈대를 end_user 와 맞췄다 (2026-08-24): 같은 머리줄, 같은 '현재/후보 + 화면·해설'
+    묶음, 번호 붙은 후보, 같은 [질문] 한 줄. 두 노드가 하는 일이 "제시된 지점 중
+    고르기"로 같은데 형식이 달라 규칙과 파서를 따로 들고 있었다.
+
+    다만 **구간의 대사·화면 블록은 남긴다.** 끝 후보는 샷 경계라 그 자리의 화면이
+    있지만, 시작 후보는 보드 검출 투구라 그 초의 화면 분류가 비어 있는 경우가 많다
+    (v203 실측 81% NULL). 후보 줄만으로는 후보끼리 구별이 안 돼, "그 사이에 무슨
+    일이 있었나"를 볼 재료를 함께 준다.
+    """
+    r = rows[0]
+    lines = [_head(r, "시작"), *_cand_lines("현재 시작", r["cs"], r["cur"])]
+    for i, c in enumerate(r["cands"], 1):
+        lines += _cand_lines("시작후보", c["sec"], c, note=c.get("why", ""), num=i)
+    if r["utts"]:
+        lines += ["", "[구간 대사]"]
+        lines += [f" - {hms(us)} ~ {hms(ue)} : \"{t}\"" for us, ue, t in r["utts"]]
+    if r["shots"]:
+        lines += ["", "[구간 화면]"]
+        lines += [f" - {hms(x['s'])} : [{x.get('shot_type') or '미분류'}] "
+                  f"{x.get('summary') or '(설명 없음)'}" for x in r["shots"]]
+    return "\n".join(lines) + "\n\n[질문] 시작을 어디로 할까?"
 
 
 def end_user(rows: list[dict]) -> str:
@@ -234,8 +228,8 @@ def end_user(rows: list[dict]) -> str:
     return "\n\n".join(blocks) + "\n\n[질문] 끝을 어디로 할까?"
 
 
-def _head(r: dict) -> str:
-    """행 머리 — 장면 번호·태그·이닝·현재 구간."""
+def _head(r: dict, _kind: str = "끝") -> str:
+    """행 머리 — 장면 번호·태그·이닝·현재 구간. 끝·시작 프롬프트 공용."""
     return (f"■ 장면 {r['scene_id']} [{','.join(r['tags'])}]"
             + (f" {r['inning']}" if r.get("inning") else "")
             + f" — 현재 {hms(r['cs'])}~{hms(r['ce'])} ({r['ce'] - r['cs']:.0f}s)")

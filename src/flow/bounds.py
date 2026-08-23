@@ -202,20 +202,22 @@ def end_rows(clips: list[dict], segs: list[dict], utts: list) -> list[dict]:
         cs, ce = c["cut"]["cs"], c["cut"]["ce"]
         raw = [{"sec": sec, "why": why, **_ctx(sec, segs, utts, at_end=True)}
                for sec, why in end_candidates(c, segs, utts)]
-        # 현재와 구별되지 않는 후보를 뺀다 — 단 **발화 끝 후보만**이다.
+        # 현재와 화면·해설이 똑같은 후보는 뺀다 — 종류를 가리지 않는다 (2026-08-24).
         #
-        # 샷 경계 후보는 설명이 현재와 같아도 지우면 안 된다: 현재 끝이 샷 한복판이면
-        # 그 샷의 끝은 화면·해설이 당연히 같고(같은 샷이니까), 그런데도 "샷을 끝까지
-        # 보고 자른다"는 **다른 선택**이다. 후보 줄의 '화면 전환' 표기가 그 차이를
-        # 모델에게 이미 보여 준다. 서명으로 지우면 샷 스냅이 통째로 사라진다.
+        # 모델이 보는 것이 전부 같으면 고를 근거가 프롬프트 안에 없다. 답이 없는 문제를
+        # 내면 판별자를 찾다가 사고를 태운다(comp37 장면46: 그런 후보 하나뿐인 콜이
+        # thinking 11,366자 — 다른 콜의 5~10배).
         #
-        # 발화 끝 후보는 다르다. 화면도 안 바뀌고 해설도 같으면 정말 아무것도 아니고,
-        # 그 답은 이미 "유지"다. (comp38 실측: 후보 14개 중 6개가 현재와 해설 동일.)
+        # 처음엔 '발화 끝' 후보에만 걸었다. 샷 경계는 설명이 같아도 "샷을 끝까지 보고
+        # 자른다"는 다른 선택이라 남겨야 한다고 봤는데, 실측이 그 걱정을 지웠다:
+        # 4회 실행 78콜에서 '현재와 동일'한 샷 경계 후보는 4건뿐이고 **전부 다른 후보와
+        # 함께** 나왔다. 즉 이걸 빼도 물어볼 콜이 사라지지 않는다 — 고를 수 없는
+        # 선택지만 없어진다.
+        #
+        # 남은 후보가 0이면 end_rows 가 그 클립을 행에서 빼고, graph 가 asked=0 으로
+        # 트레이스에 남긴다. "물어볼 게 없어서 안 물었다"가 기록으로 보인다.
         cur = _ctx(ce, segs, utts, at_end=True)
-        cur_sig = _sig(cur)
-        raw = [e for e in raw
-               if e["why"] != "발화 끝" or _sig(e) != cur_sig]
-        ends = sorted(_dedup(raw), key=lambda e: e["sec"])
+        ends = sorted(_dedup(raw, drop_sig=_sig(cur)), key=lambda e: e["sec"])
         if ends:
             rows.append({"scene_id": c["scene_id"], "tags": c["tags"],
                          "inning": c.get("inning") or "", "cs": cs, "ce": ce,
@@ -384,11 +386,6 @@ def apply_end(clips: list[dict], rows: list[dict], text: str) -> list[str]:
 
 
 def apply_start(clips: list[dict], rows: list[dict], text: str) -> list[str]:
-    """시작 제안 처분 — 아직 **초 값**으로 받는다 (끝만 번호로 바꿨다, 2026-08-24).
-
-    같은 이유로 번호가 나은 자리지만, 이 노드는 현재 대상이 0건이라(상류가 대표 투구
-    있는 사건만 발행해 앵커가 전부 잡힌다) 프롬프트를 함께 바꿔도 검증할 실행이 없다.
-    시작 대상이 생기면 그때 끝과 같이 맞춘다.
-    """
+    """시작 제안 처분 — 끝과 같이 **후보 번호**로 받는다 (2026-08-24 형식 통일)."""
     return _apply_one(clips, rows, text, field="cs", key="cands", label="시작",
-                      by_index=False)
+                      by_index=True)
