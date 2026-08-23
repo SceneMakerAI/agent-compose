@@ -323,6 +323,36 @@ def test_plan_system_keeps_vocab():
     assert "{budget}" not in prompts.PLAN_SYSTEM     # 예산은 값으로 안 간다 — 질의 문구뿐
 
 
+def test_bound_systems_share_one_shape():
+    """끝·시작 시스템 프롬프트가 같은 뼈대다 — 역할 한 줄 + 세 블록 + 같은 출력 규약.
+
+    두 노드가 하는 일이 "제시된 지점 중 고르기"로 같은데 시작 쪽만 [시스템 역할 및
+    규칙] 머리·번호 매긴 절차로 남아 있었다 (2026-08-24 통일).
+    """
+    from flow import prompts
+
+    for sysmsg in (prompts.END_SYSTEM, prompts.START_SYSTEM):
+        assert sysmsg.startswith("당신은 야구 하이라이트 클립의 ")
+        assert "[시스템 역할 및 규칙]" not in sysmsg
+        for block in ("[후보 읽는 법]", "[고르는 법]", "[RULES]",
+                      "[OUTPUT — 번호 하나 또는 \"유지\", 다른 말 금지]"):
+            assert block in sysmsg, (block, sysmsg[:40])
+        assert sysmsg.rstrip().endswith("2")          # 응답 예시는 번호 하나
+        assert "번호 중 하나" in sysmsg and "시각이나" in sysmsg
+
+
+def test_start_system_points_at_window_blocks():
+    """시작 후보엔 화면·해설이 안 붙을 수 있다 — 구간 블록을 보라고 일러 줘야 한다.
+
+    실측(v201 장면72): 후보 줄이 '1) 시작후보 02:54:03  보드 검출 투구' 한 줄뿐이고
+    화면·해설이 아예 없었다. 보드 검출 투구는 샷 분류와 독립이라 그 초의 분류가
+    비어 있는 일이 흔하다(v203 81% NULL).
+    """
+    from flow import prompts
+
+    assert "[구간 화면]" in prompts.START_SYSTEM and "[구간 대사]" in prompts.START_SYSTEM
+
+
 def test_plan_system_leaves_length_to_code():
     """분량 산술은 모델 몫이 아니다 — 예산은 인자로 받아 finish 가 덜어낸다.
 
