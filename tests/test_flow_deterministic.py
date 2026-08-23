@@ -324,7 +324,7 @@ def test_plan_system_keeps_vocab():
 
 
 def test_plan_system_asks_for_double_length():
-    """목표 시간의 **2배**로 고르라는 규칙이 있어야 한다.
+    """목표 시간의 **1.5배**로 고르라는 규칙이 있어야 한다.
 
     인벤토리의 '영상길이'는 장면 길이인데 실제 클립은 cut 이 좁혀 훨씬 짧다 —
     실측(comp42 · 15분 요청): 모델은 901초(15.0분)를 골랐고 최종은 513초(8.6분).
@@ -332,5 +332,22 @@ def test_plan_system_asks_for_double_length():
     """
     from flow import prompts
 
-    assert "2배" in prompts.PLAN_SYSTEM
+    assert "1.5배" in prompts.PLAN_SYSTEM
     assert "목표 시간이 없으면" in prompts.PLAN_SYSTEM   # 없을 때 규칙도 함께
+
+
+def test_plan_system_closes_with_game_ending_out():
+    """일반 하이라이트 요청이면 경기 종료(마지막 아웃) 장면으로 닫으라는 규칙.
+
+    찾는 근거는 인벤토리의 '전광판'(t_scene_baseball.tags) 줄에 있는 '이닝종료' 다.
+    그 표식은 **매 반이닝 끝마다** 붙으므로 탐색을 가장 늦은 이닝으로 묶어야 한다 —
+    안 묶으면 8회말 종료 아웃을 경기 종료로 집는다.
+
+    없을 수도 있다: v1003 은 9회말 마지막 장면이 '2루'(안타)이고 그 이닝에 '이닝종료'가
+    없다(중계가 경기 종료 전에 끝났다). 그때 억지로 채우지 말라는 줄이 함께 있어야 한다.
+    """
+    from flow import prompts
+
+    assert "이닝종료" in prompts.PLAN_SYSTEM
+    assert "가장 늦은 이닝" in prompts.PLAN_SYSTEM
+    assert "넣지 않습니다" in prompts.PLAN_SYSTEM        # 없을 때 폴백
