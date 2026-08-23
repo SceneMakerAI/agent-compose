@@ -15,6 +15,9 @@ from flow import vocab
 # 하드코딩하면 vision3 에 태그가 늘어도 프롬프트만 옛 어휘로 남는다 (보크 실측).
 TAG_VOCAB = ", ".join(t for t in vocab.PLAY_TAGS if t != "판별불가")
 LABEL_VOCAB = ", ".join(vocab.LABELS)
+# 판세는 2026-08-23 상류 개편으로 라벨에서 갈라져 나온 축이다 (game_context).
+# 어휘 줄에서 빼면 '역전 장면' 같은 질의가 어느 축으로도 안 걸린다.
+CONTEXT_VOCAB = ", ".join(vocab.GAME_CONTEXTS)
 
 PLAN_SYSTEM = f"""\
 [시스템 역할 및 규칙]
@@ -23,6 +26,7 @@ PLAN_SYSTEM = f"""\
 1. 용어 정의:
    - 태그: {TAG_VOCAB}
    - 라벨: {LABEL_VOCAB}
+   - 판세: {CONTEXT_VOCAB}
    - 관점: 이닝 "초" = 원정팀 공격 / 이닝 "말" = 홈팀 공격
    - 용어 번역: 질의의 표현을 표준 용어로 변환 (예: 더블플레이 → 병살, 데드볼 → 사구)
 
@@ -32,6 +36,11 @@ PLAN_SYSTEM = f"""\
    - 팀 하이라이트 요청 시: 해당 팀 공격(득점·안타·홈런) 및 수비 성공(상대 삼진·병살 처리) 위주로 선택합니다.
    - 수비 성공(캐치, 호수비, 다이빙 등) 탐색 시: 태그가 '안타'인 장면은 제외합니다. (안타는 수비 실패 결과임. 수비 성공은 범타·호수비 태그에 위치함)
    - 검색증거(화면/해설)와 보드 사실(태그/라벨)이 충돌하면 보드 사실을 우선시하되, 검색증거가 질의 의도에 부합하면 태그 지정 범위를 넘어 선곡할 수 있습니다.
+
+3. 분량 규칙:
+   - 질의에 목표 시간이 있으면 인벤토리 '영상길이'의 합이 **그 2배**가 되도록 고릅니다.
+   - '영상길이'는 장면 전체 길이이고 실제 클립은 그중 필요한 화면만 잘라 쓰므로, 최종 결과는 고른 합의 절반 가까이로 줄어듭니다.
+   - 목표 시간이 없으면 분량을 신경 쓰지 않고 질의에 맞는 장면만 고릅니다.
 
 [출력 예시]
 5,26,46,59\
@@ -43,8 +52,13 @@ def plan_user(query: str, game_line: str, inventory: str, feedback: str = "") ->
 
     검색 증거는 별도 블록이 아니라 **인벤토리의 해당 장면 블록 안에** 들어간다
     (plan.render_inventory 가 병합) — 번호로만 이어져 조인이 모델 몫이던 문제 해소.
-    예산은 프롬프트에 싣지 않는다: 몇 초를 담을지는 fill_budget 이 정하고, 모델은
-    "무엇이 질의에 맞는가"만 답한다.
+
+    분량은 질의 문구로만 들어온다 — 예산을 맞추던 fill_budget 노드는 플로우 재설계
+    때 폐기됐고 지금은 어느 단계도 길이를 맞추지 않는다. 그래서 PLAN_SYSTEM 이
+    **2배로 고르라**고 지시한다: 인벤토리의 '영상길이'는 장면 길이인데 실제 클립은
+    cut 이 태그 레시피로 좁혀 훨씬 짧다. 실측(comp42 · 15분 요청): 모델은 정확히
+    901초(15.0분)를 골랐는데 최종은 513초(8.6분)로 43% 가 깎였다 — 12건 중 11건이
+    줄었고 장면당 평균 -32초다. 모델은 이 계산을 볼 수 없으니 배수로 보정한다.
     """
     fb = f"\n[이전 시도 피드백]\n{feedback}\n" if feedback else ""
     return f"""[경기 정보]
@@ -70,6 +84,7 @@ EXPAND_SYSTEM = f"""\
 [어휘 — 필터로 쓸 수 있는 말의 전부]
 - 태그: {TAG_VOCAB}
 - 라벨: {LABEL_VOCAB}
+- 판세: {CONTEXT_VOCAB}
 
 [RULES]
 - 검색어는 2~4개. 서로 다른 각도여야 한다 (해설 콜 / 화면 묘사 / 선수 이름).
@@ -100,21 +115,19 @@ END_SYSTEM = """\
 [후보 읽는 법]
 - 후보마다 그 시각의 화면과 해설이 함께 적혀 있다. 시각을 따로 맞출 필요 없이 그 자리에서 판단하면 된다.
 - 맨 위 '현재'는 지금 클립이 끝나는 지점과 그 시각의 화면·해설이다.
-- 후보는 **전부 현재 끝보다 뒤**다. 고를 수 있는 건 "유지" 아니면 "미루기"다.
 
 [고르는 법]
-- 결과가 확정되고 **그 결과를 설명하는 해설이 끝나는** 지점.
+- 결과가 확정되고 그 결과를 설명하는 해설이 끝나는 지점.
 - 후보의 해설이 문장 도중이면 그 지점은 이르다. 문장이 끝나는 후보를 고른다.
 - 해설이 이미 다음 타석·다른 화제로 넘어갔으면 그 후보는 늦다. 버리고 앞쪽을 고른다.
 - 다음 타석 준비·광고까지 끌고 가지 않는다.
-- 현재 끝에서 이미 결과와 설명이 끝났으면 "유지"다.
 
 [RULES]
-- 반드시 제시된 후보의 초 값 중 하나를 쓴다. 임의의 초를 지어내지 않는다.
+- 반드시 제시된 후보의 번호 중 하나를 쓴다. 시각이나 다른 말을 쓰지 않는다.
 - 제시된 후보가 전부 부적절하면 "유지"를 고른다. 억지로 고르지 않는다.
 
-[OUTPUT — 클립마다 한 줄, 다른 말 금지]
-장면 <번호>: 끝 <유지|초>\
+[OUTPUT — 번호 하나 또는 "유지", 다른 말 금지]
+2\
 """
 
 START_SYSTEM = """\
@@ -176,13 +189,32 @@ def start_user(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def hms(sec: float) -> str:
+    """초 → 'HH:MM:SS' — 프롬프트 표기 전용 (2026-08-24).
+
+    모델에게 초 단위 정수를 보여 주면 경기 시각을 머리로 환산해야 한다(9950s 가 몇 회
+    언제인지 감이 안 온다). 상류 DB 표기(t_scene_baseball.start_time 등)도 같은 모양이라
+    사람이 눈으로 대조할 때도 이 쪽이 맞다. 소수는 버린다 — 표시용이고, 적용은 후보
+    번호로 원래 값(소수 포함)을 되찾는다.
+    """
+    h, rem = divmod(int(sec), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 def end_user(rows: list[dict]) -> str:
-    """bounds.end_rows() 산출 → 끝 후보 프롬프트 (후보마다 화면·해설 동봉)."""
+    """bounds.end_rows() 산출 → 끝 후보 프롬프트 (후보마다 화면·해설 동봉).
+
+    후보에는 **번호**를 붙인다 (2026-08-24). 모델은 그 번호만 답하고, 초 값은 코드가
+    되찾는다 — 시각을 받아쓰게 하면 소수가 사라진다. 내부 좌표는 t_segment 경계라
+    소수를 갖고 있고(4369.3s = '투구' 샷 시작), 정수로 되돌리면 직전 샷 꼬리로 넘어간다.
+    번호는 지어내도 목록 밖이라 기각되므로 시각을 지어내는 것보다 안전하다.
+    """
     blocks = []
     for r in rows:
         lines = [_head(r), *_cand_lines("현재 끝", r["ce"], r["cur"])]
-        for c in r["ends"]:
-            lines += _cand_lines("끝후보", c["sec"], c, note=c["why"])
+        for i, c in enumerate(r["ends"], 1):
+            lines += _cand_lines("끝후보", c["sec"], c, note=c["why"], num=i)
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) + "\n\n[질문] 끝을 어디로 할까?"
 
@@ -191,13 +223,15 @@ def _head(r: dict) -> str:
     """행 머리 — 장면 번호·태그·이닝·현재 구간."""
     return (f"■ 장면 {r['scene_id']} [{','.join(r['tags'])}]"
             + (f" {r['inning']}" if r.get("inning") else "")
-            + f" — 현재 {r['cs']:.0f}~{r['ce']:.0f}s ({r['ce'] - r['cs']:.0f}s)")
+            + f" — 현재 {hms(r['cs'])}~{hms(r['ce'])} ({r['ce'] - r['cs']:.0f}s)")
 
 
-def _cand_lines(label: str, sec: float, ctx: dict, note: str = "") -> list[str]:
+def _cand_lines(label: str, sec: float, ctx: dict, note: str = "",
+                num: int | None = None) -> list[str]:
     """후보 1건 = 헤더 + 화면 + 해설. 값이 없는 줄은 아예 내지 않는다(빈 줄이 늘면
-    프롬프트만 길어지고 읽기가 나빠진다)."""
-    out = [f"  {label} {sec:.0f}s" + (f"  {note}" if note else "")]
+    프롬프트만 길어지고 읽기가 나빠진다). num 이 있으면 앞에 '1)' 처럼 번호를 단다."""
+    head = f"  {label} {hms(sec)}" if num is None else f"  {num}) {label} {hms(sec)}"
+    out = [head + (f"  {note}" if note else "")]
     if ctx.get("shot") or ctx.get("shot_type"):
         out.append(f"     화면 [{ctx.get('shot_type') or '미분류'}] "
                    f"{ctx.get('shot') or '(설명 없음)'}")

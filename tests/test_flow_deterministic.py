@@ -20,7 +20,10 @@ _BENCH4 = Path(__file__).resolve().parents[3] / "poc" / "poc-search-bench4" / "s
 # 그 갈라진 지점만 여기 명시하고 나머지는 계속 전행 등가로 묶는다 —
 # 목록을 늘리지 않으면 새 드리프트는 그대로 실패로 드러난다.
 _NEW_TAGS = {"보크"}                          # bench4 이후 vision3 에 추가된 태그
+_RENAMED_TAGS = {"실책": "수비실책"}            # vision3 어휘 SSOT 이름 (드리프트 실측 2026-08-23)
 _RENAMED_LABELS = {"희생플라이": "진루타"}       # 전광판으론 뜬공/땅볼 구분 불가 → 포괄 명칭
+# 판세 축(game_context)으로 이사한 라벨 — bench4 RANK_LABEL_BONUS 에는 남아 있다.
+_MOVED_TO_CONTEXT = {"역전", "동점"}
 
 
 @pytest.fixture(scope="module")
@@ -54,17 +57,25 @@ def bench4():
         sys.modules.update(saved)
 
 
-def scene(scene_id, s, e, *, tags="안타", labels="", delta=0, inning="7회 초", pitch=None):
+def scene(scene_id, s, e, *, tags="안타", labels="", delta=0, inning="7회초",
+          pitch=None, context=None):
+    """발행본 행 흉내 — 키는 SourceRepo.fetch_scenes 산출과 같아야 한다.
+
+    이닝 표기는 '7회초'(공백 없음) — 상류 t_play_baseball.inning 원문 그대로다.
+    """
     return {"scene_id": scene_id, "s": float(s), "e": float(e),
-            "tags": tags.split(","), "label_list": labels.split(",") if labels else [],
+            "tags": tags.split(",") if tags else [],
+            "label_list": labels.split(",") if labels else [],
+            "game_context": context,
             "score_delta": delta, "inning": inning, "pitch_sec": pitch}
 
 
 SCENES = [
-    scene(1, 100, 130, tags="홈런", delta=1, inning="1회 초", pitch=102),
-    scene(2, 200, 240, tags="안타", labels="적시타,역전", delta=2, inning="8회 말", pitch=205),
-    scene(3, 300, 320, tags="삼진", inning="9회 초", pitch=301),
-    scene(4, 400, 460, tags="범타", labels="병살", inning="5회 말", pitch=None),
+    scene(1, 100, 130, tags="홈런", delta=1, inning="1회초", pitch=102),
+    scene(2, 200, 240, tags="안타", labels="적시타", context="역전", delta=2,
+          inning="8회말", pitch=205),
+    scene(3, 300, 320, tags="삼진", inning="9회초", pitch=301),
+    scene(4, 400, 460, tags="범타", labels="병살", inning="5회말", pitch=None),
 ]
 SEGS = [
     {"seg_id": 1, "s": 100.0, "e": 106.0, "shot_type": "투구"},
@@ -83,11 +94,31 @@ SEGS = [
 UTTS = [(213.0, 219.5, "적시타! 주자 들어옵니다"), (302.0, 316.0, "삼진 아웃 긴 발화")]
 
 
-def test_rank_equiv(bench4):
-    ours = [(r["scene_id"], rank.score(r)) for r in rank.order(SCENES, [1, 2, 3, 4])]
-    theirs = [(r["scene_id"], bench4["rank"].score(r))
-              for r in bench4["rank"].order(SCENES, [1, 2, 3, 4])]
-    assert ours == theirs
+def test_rank_order_is_deterministic():
+    """rank 는 중요도 내림차순·동점은 시간순. bench4 전행 등가 대조는 **은퇴**했다.
+
+    상류가 판세(역전·동점)를 labels 에서 game_context 로 옮기면서(2026-08-23)
+    가중이 RANK_LABEL_BONUS 에서 RANK_CONTEXT_BONUS 로 갈라졌다. bench4 는 동결된
+    POC 라 그 축이 아예 없어, 계속 대조하면 **낡은 계약을 붙잡는 쪽**이 된다.
+    이식 검증은 끝났고 지금 지켜야 하는 건 정렬 규칙 자체다 (cut 은 등가 유지).
+    """
+    rows = rank.order(SCENES, [1, 2, 3, 4])
+    scores = [rank.score(r) for r in rows]
+    assert scores == sorted(scores, reverse=True)
+    assert [r["scene_id"] for r in rows] == [2, 1, 3, 4]
+    # 장면2: 델타2×3 + 적시타1 + 역전4(판세) + 8회//3=2 = 13 — 판세가 실제로 걸린다
+    assert rank.score(rows[0]) == 13
+
+
+def test_rank_survives_unjudged_scene():
+    """해석이 빈 장면(labels NULL)도 점수가 난다 — 실측 v200~203 에 12행.
+
+    구 스키마에선 `(scene_type or "").split(",")` 이 `[""]` 를 돌려줘 태그 목록이
+    우연히 안 비었다. 이제 빈 목록이라 max() 에 default 가 없으면 ValueError 로
+    편성 전체가 죽는다.
+    """
+    r = scene(9, 100, 130, tags="", labels="", delta=0, inning="3회초")
+    assert r["tags"] == [] and rank.score(r) == 1        # 이닝 가중만
 
 
 def test_cut_equiv(bench4):
@@ -104,6 +135,9 @@ def test_cut_equiv(bench4):
             continue
         ours = cut.clip(dict(sc), SEGS, UTTS)
         theirs = bench4["cut"].clip(dict(sc), SEGS, UTTS)
+        # anchor_type 은 bench4 이후 신설 — 좌표가 아니라 하류(start_rows 게이트)가
+        # "이 시작을 믿을 수 있나"를 판단할 재료다. 등가 대상은 좌표·모드다.
+        ours.pop("anchor_type", None)
         assert ours == theirs, f"scene {sc['scene_id']} 불일치: {ours} != {theirs}"
 
 
@@ -148,12 +182,17 @@ def test_cut_immutability():
 def test_vocab_constants_equal_bench4(bench4):
     """상수 드리프트 감시 — bench4 config 와 값 일치."""
     c = bench4["config"]
-    assert {k: v for k, v in vocab.CUT_RECIPE.items() if k not in _NEW_TAGS} == c.CUT_RECIPE
+    assert {k: v for k, v in vocab.CUT_RECIPE.items() if k not in _NEW_TAGS} == {
+        _RENAMED_TAGS.get(k, k): v for k, v in c.CUT_RECIPE.items()
+    }
     assert vocab.FULL_CLIP_TAGS == c.FULL_CLIP_TAGS
     assert vocab.LABEL_EXTRA_SHOTS == {
         _RENAMED_LABELS.get(k, k): v for k, v in c.LABEL_EXTRA_SHOTS.items()
     }
-    assert vocab.RANK_LABEL_BONUS == c.RANK_LABEL_BONUS
+    # 판세로 이사한 라벨은 **값을 그대로** 들고 갔다 — 구조만 갈라졌지 숫자는 안 건드렸다.
+    merged = vocab.RANK_LABEL_BONUS | vocab.RANK_CONTEXT_BONUS
+    assert all(merged[k] == v for k, v in c.RANK_LABEL_BONUS.items())
+    assert set(c.RANK_LABEL_BONUS) - set(vocab.RANK_LABEL_BONUS) == _MOVED_TO_CONTEXT
     assert vocab.RANK_TAG_BONUS == c.RANK_TAG_BONUS
     # endfix·underfill 상수는 그 단계가 사라져 대조 대상에서 뺐다 (2026-08-20).
     # 등가 테스트가 죽은 상수를 붙잡아 두는 역전을 막는다 — 감시할 건 **쓰는 값**이다.
@@ -173,51 +212,78 @@ def test_vocab_tags_synced_with_vision3():
     assert vocab.PLAY_TAGS == tuple(t.name for t in mod.TAGS)   # 프롬프트 어휘 줄 순서
 
 
-def _vision3_labels(pub: Path) -> set[str]:
-    """vision3 publish 가 t_scene_baseball.labels 에 넣을 수 있는 문자열 전부.
+_V3 = Path(__file__).resolve().parents[2] / "agent-vision3" / "src" / "sports" / "baseball"
 
-    labels() 는 `[lab for cond, lab in [(조건, "라벨"), ...] if cond]`,
-    end_labels() 는 리스트 리터럴 + out.append(...) 형태다. 두 함수 안의 문자열을
-    구조로 집어낸다 — 조건절에 섞인 태그명("삼진" 등)까지 긁지 않으려면 위치가
-    필요하다. vision3 가 이 형태를 바꾸면 여기서 빈 집합이 되어 테스트가 깨진다
-    (조용히 통과하는 것보다 낫다).
+
+def _load_v3(rel: str):
+    """vision3 모듈 소스를 AST 로 연다 — 없으면 스킵 (모노레포 밖 실행 허용)."""
+    path = _V3 / rel
+    if not path.exists():
+        pytest.skip(f"agent-vision3/{rel} 미존재")
+    return ast.parse(path.read_text(encoding="utf-8"))
+
+
+def _derived_labels(tree: ast.Module) -> set[str]:
+    """vision3 `scene/judge.derive` 가 붙일 수 있는 파생 라벨 전부.
+
+    derive() 는 `[lab for cond, lab in [(조건, "라벨"), ...] if cond]` 형태다 —
+    그 함수 안 2원소 튜플의 **두 번째** 원소만 집는다. 조건절에 섞인 태그명
+    ("삼진" 등)까지 긁지 않으려면 위치가 필요하다. vision3 가 이 형태를 바꾸면
+    여기서 빈 집합이 되어 테스트가 깨진다 (조용히 통과하는 것보다 낫다).
+
+    2026-08-23 이전에는 `publish/__init__.py` 의 labels()·end_labels() 가 출처였다.
+    scene 재설계로 그 함수들이 사라지면서 판정·파생이 scene/judge 로 옮겨왔다.
     """
-    tree = ast.parse(pub.read_text(encoding="utf-8"))
     found: set[str] = set()
     for fn in ast.walk(tree):
-        if not isinstance(fn, ast.FunctionDef) or fn.name not in ("labels", "end_labels"):
+        if not isinstance(fn, ast.FunctionDef) or fn.name != "derive":
             continue
         for node in ast.walk(fn):
-            # (조건, "라벨") 튜플의 두 번째 원소
-            if isinstance(node, ast.Tuple) and len(node.elts) == 2 \
-                    and isinstance(node.elts[1], ast.Constant) \
-                    and isinstance(node.elts[1].value, str):
+            if (isinstance(node, ast.Tuple) and len(node.elts) == 2
+                    and isinstance(node.elts[1], ast.Constant)
+                    and isinstance(node.elts[1].value, str)):
                 found.add(node.elts[1].value)
-            # out = ["경기 종료"] / out.append("끝내기")
-            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                    and node.func.attr == "append" and node.args \
-                    and isinstance(node.args[0], ast.Constant) \
-                    and isinstance(node.args[0].value, str):
-                found.add(node.args[0].value)
-            elif isinstance(node, ast.Assign) and isinstance(node.value, ast.List):
-                found |= {e.value for e in node.value.elts
-                          if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+    return found
+
+
+def _context_names(tree: ast.Module) -> set[str]:
+    """vision3 `scene/context` 가 붙일 수 있는 판세 이름 전부.
+
+    `WALKOFF, FIRST, LEAD_CHANGE, TIE = "끝내기", "선제", "역전", "동점"` 한 줄이
+    출처다 — 모듈 최상단의 다중 대입에서 문자열만 집는다.
+    """
+    found: set[str] = set()
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple)
+                and all(isinstance(e, ast.Constant) and isinstance(e.value, str)
+                        for e in node.value.elts)):
+            found |= {e.value for e in node.value.elts}
     return found
 
 
 def test_vocab_labels_synced_with_vision3():
-    """파생 라벨은 vision3 publish 가 실제로 붙이는 문자열과 **양방향** 등가.
+    """파생 라벨은 vision3 scene/judge.derive 가 실제로 붙이는 문자열과 **양방향** 등가.
 
     한쪽(우리 것이 저쪽에 있나)만 보면 저쪽에 새로 생긴 라벨을 영원히 못 잡는다:
     '희생플라이'→'진루타' 개명이 그렇게 새어 LABEL_EXTRA_SHOTS 키가 죽은 이름으로
     남았고(실측 comp 15·16), 뒤이어 '끝내기'가 같은 구멍으로 빠져 경기 최고 장면이
     가산점 없이 일반 안타와 동급이 됐다.
     """
-    pub = (Path(__file__).resolve().parents[2] / "agent-vision3" / "src" / "sports"
-           / "baseball" / "publish" / "__init__.py")
-    if not pub.exists():
-        pytest.skip("agent-vision3 미존재")
-    assert _vision3_labels(pub) == set(vocab.LABELS)
+    got = _derived_labels(_load_v3("scene/judge.py"))
+    assert got, "derive() 에서 라벨을 못 읽었다 — vision3 가 형태를 바꿨다"
+    assert got == set(vocab.LABELS)
+
+
+def test_vocab_contexts_synced_with_vision3():
+    """판세 어휘는 vision3 scene/context 와 등가 — labels 에서 갈라져 나온 축.
+
+    이 축이 어긋나면 RANK_CONTEXT_BONUS 가 조용히 안 걸린다. 역전·동점이 정확히
+    그렇게 죽어 있었다: 상류가 두 값을 game_context 로 옮겼는데 이쪽 LABELS 에
+    이름만 남아 `validate()` 도 통과했다 (2026-08-23 실측).
+    """
+    got = _context_names(_load_v3("scene/context.py"))
+    assert got, "판세 이름을 못 읽었다 — vision3 가 형태를 바꿨다"
+    assert got == set(vocab.GAME_CONTEXTS)
 
 
 def test_vocab_validate():
@@ -253,4 +319,18 @@ def test_plan_system_keeps_vocab():
 
     assert f"- 태그: {prompts.TAG_VOCAB}" in prompts.PLAN_SYSTEM
     assert f"- 라벨: {prompts.LABEL_VOCAB}" in prompts.PLAN_SYSTEM
-    assert "{budget}" not in prompts.PLAN_SYSTEM     # 예산은 프롬프트로 가지 않는다
+    assert f"- 판세: {prompts.CONTEXT_VOCAB}" in prompts.PLAN_SYSTEM
+    assert "{budget}" not in prompts.PLAN_SYSTEM     # 예산은 값으로 안 간다 — 질의 문구뿐
+
+
+def test_plan_system_asks_for_double_length():
+    """목표 시간의 **2배**로 고르라는 규칙이 있어야 한다.
+
+    인벤토리의 '영상길이'는 장면 길이인데 실제 클립은 cut 이 좁혀 훨씬 짧다 —
+    실측(comp42 · 15분 요청): 모델은 901초(15.0분)를 골랐고 최종은 513초(8.6분).
+    이 줄이 빠지면 요청 분량의 절반짜리가 조용히 나온다.
+    """
+    from flow import prompts
+
+    assert "2배" in prompts.PLAN_SYSTEM
+    assert "목표 시간이 없으면" in prompts.PLAN_SYSTEM   # 없을 때 규칙도 함께

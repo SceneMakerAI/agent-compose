@@ -24,8 +24,9 @@ class Inventory:
     segs: tuple[dict, ...]                    # scene-cut 샷 (s·e·shot_type)
     utts: tuple[tuple[float, float, str], ...]  # STT (s, e, text) 시간순
     game_line: str                            # "v_id=201  삼성(원정) vs 롯데(홈)"
-    pitches: tuple = ()                       # 보드 검출 투구 전량 — refine_bounds 재료
-    trans: tuple[dict, ...] = ()              # 전광판 전이 — score_match 가 구간별로 골라 쓴다
+    pitches: tuple = ()                       # 검출 투구 전량 — refine_bounds 재료
+    # `trans`(전광판 전이)는 없앴다 — score_match 폐기로 읽는 코드가 사라졌고,
+    # 그 사이 상류에서 t_transition_baseball 테이블 자체가 삭제됐다 (2026-08-23).
 
 
 class ComposeState(TypedDict, total=False):

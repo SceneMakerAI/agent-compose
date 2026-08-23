@@ -43,6 +43,41 @@ def render_bases(bases: str | None) -> str:
     return "·".join(on) if on else "주자없음"
 
 
+def score_after(r: dict) -> str:
+    """플레이 **후** 점수 '1-0' (원정-홈). 계산할 수 없으면 앞 점수 그대로, 없으면 '?'.
+
+    구 스키마의 `score` 컬럼('KIA 0-0 삼성')이 사라져 **계산으로 바뀐 자리**다
+    (vision3 migration_20260823i — 전이 원장 폐기로 팀명 출처가 없어졌다).
+    score_before(원정-홈) + score_delta 에 이닝의 초/말로 어느 쪽이 올랐는지를
+    더한다: 초는 원정 공격, 말은 홈 공격이다. 공격팀을 모르면 올리지 않는다 —
+    어느 쪽인지 모르는 채로 찍으면 점수가 통째로 틀린 값이 된다.
+    """
+    before = r.get("score_before") or "?"
+    delta = r.get("score_delta") or 0
+    inning = r.get("inning") or ""
+    if before == "?" or delta <= 0:
+        return before
+    away, _, home = before.partition("-")
+    try:
+        away, home = int(away), int(home)
+    except ValueError:
+        return before
+    if inning.endswith("초"):
+        away += delta
+    elif inning.endswith("말"):
+        home += delta
+    else:
+        return before
+    return f"{away}-{home}"
+
+
+def render_score(r: dict) -> str:
+    """인벤토리 점수 줄 — '0-0 -> 1-0'. 득점이 없으면 앞 점수 하나만."""
+    before = r.get("score_before") or "?"
+    after = score_after(r)
+    return before if after == before else f"{before} -> {after}"
+
+
 def render_inventory(scenes: list[dict], evidence: list[dict] | None = None) -> str:
     """t_scene_baseball 행 → select_clips 가 보는 장면 블록들 (경기 단위라 전 행).
 
@@ -56,17 +91,20 @@ def render_inventory(scenes: list[dict], evidence: list[dict] | None = None) -> 
     by_scene = {g["scene_id"]: g for g in (evidence or [])}
     out: list[str] = []
     for r in scenes:
-        before = r["score_before"] or "?"
-        cur = r["score"].split()[1] if r["score"] else "?"
         outs = r.get("outs")
         lines = [f"[장면 {r['scene_id']}]",
                  f"- 이닝: {r['inning'] or '?'}",
                  f"- 아웃: {outs if outs is not None else '?'}",
                  f"- 주자: {render_bases(r.get('bases'))}",
-                 f"- 태그: {r['scene_type']}"]
-        if r.get("labels"):
-            lines.append(f"- 라벨: {r['labels']}")
-        lines.append(f"- 점수상황: {before} -> {cur}")
+                 f"- 태그: {','.join(r['tags']) or '판별불가'}"]
+        if r.get("label_list"):
+            lines.append(f"- 라벨: {','.join(r['label_list'])}")
+        if r.get("game_context"):
+            lines.append(f"- 판세: {r['game_context']}")
+        # 전광판 사실 — 해석(태그·라벨)이 비어도 남는 유일한 재료라 항상 싣는다.
+        if r.get("board_tags"):
+            lines.append(f"- 전광판: {','.join(r['board_tags'])}")
+        lines.append(f"- 점수상황: {render_score(r)}")
         lines.append(f"- 영상길이: {r['e'] - r['s']:.0f}s")
         if r.get("batter"):
             lines.append(f"- 기타정보: {r['batter']}")

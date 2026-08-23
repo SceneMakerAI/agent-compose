@@ -109,6 +109,10 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         # 인벤토리는 요청당 1회 렌더가 원칙이나, 증거를 장면 블록에 병합하려면
         # retrieve_evidence 결과가 필요해 여기서 다시 만든다 (순수 문자열 조립).
         inventory = plan.render_inventory(list(inv.scenes), st.get("evidence", []))
+        # 이 노드는 thinking 을 **켠다** — 85장면 인벤토리에서 "질의에 맞는 것"을 고르는
+        # 일이라 경계 고르기(refine_*)와 성격이 다르다. 대신 시간 가드를 240→480 으로
+        # 올렸다(llm.THINK_TIMEOUT_SEC): 240 에서는 comp39·40 이 매번 타임아웃해 편성
+        # 소요의 96%가 버려진 대기였고, 그때 나온 선곡은 사실 thinking 없는 폴백이었다.
         text = await llm.chat(
             prompts.PLAN_SYSTEM,
             prompts.plan_user(st["query"], inv.game_line, inventory, st.get("feedback", "")),
@@ -155,17 +159,22 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         inv = st["inv"]
         clips = [dict(r, cut=dict(r["cut"])) for r in _cut_clips(st)]   # 복사 후 수정
         if not use_refine or not clips:
-            return {"clips": clips}
+            return _skipped(st, "refine_end_bound", clips,
+                            "보정 꺼짐" if not use_refine else "클립 없음")
         rows = bounds_mod.end_rows(clips, list(inv.segs), inv.utts)
         log.info("refine_end_bound 대상 %d/%d클립", len(rows), len(clips))
         if not rows:
-            return {"clips": clips}
+            return _skipped(st, "refine_end_bound", clips, "후보 없음")
 
         async def one(row: dict) -> str:
             """행 1건 질의 — 실패는 그 클립만 원 경계 유지 (배치 전체를 죽이지 않는다)."""
             try:
+                # thinking 끔 (2026-08-24 결정). 끝 고르기는 후보를 나란히 놓고 해설이
+                # 어디서 끝나는지 보는 일이라 추론 사슬이 필요 없고, 켜 두면 후보끼리
+                # 우열 근거가 약할 때 판별자를 찾다가 폭주한다 — comp38 장면5 는
+                # 41,317자를 태우고 본문 없이 떨어져 재시도로 겨우 건졌다.
                 return await llm.chat(
-                    prompts.END_SYSTEM, prompts.end_user([row]), thinking=True,
+                    prompts.END_SYSTEM, prompts.end_user([row]), thinking=False,
                     trace=st.get("trace"), name=f"refine_end_bound[{row['scene_id']}]")
             except Exception as e:                   # noqa: BLE001 — 건별 격리
                 log.warning("refine_end_bound 실패(장면%d 경계 유지): %s", row["scene_id"], e)
@@ -191,17 +200,23 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         inv = st["inv"]
         clips = [dict(r, cut=dict(r["cut"])) for r in st["clips"]]
         if not use_refine or not clips:
-            return {"clips": clips}
+            return _skipped(st, "refine_start_bound", clips,
+                            "보정 꺼짐" if not use_refine else "클립 없음")
         rows = bounds_mod.start_rows(clips, list(inv.segs), inv.utts, list(inv.pitches))
-        log.info("refine_start_bound 대상 %d/%d클립 — 나머지는 투구 앵커가 있어 cut 시작 그대로",
-                 len(rows), len(clips))
+        log.info("refine_start_bound 대상 %d/%d클립 — 나머지는 앵커 샷이 %s 라 시작 그대로",
+                 len(rows), len(clips), "·".join(sorted(bounds_mod.TRUSTED_ANCHOR_SHOTS)))
         if not rows:
-            return {"clips": clips, "status": "ok"}
+            return _skipped(st, "refine_start_bound", clips, "믿을 수 있는 앵커뿐")
 
         async def one(row: dict) -> str:
             try:
+                # thinking 끔 (2026-08-24) — 끝과 같은 이유다. 켜 두는 근거였던 실측
+                # ("끄자 13콜 중 11건이 시작 유지→이동으로 뒤집혔다")은 **구 게이트
+                # 시절 수치**라 지금은 성립하지 않는다: 그때는 앵커 없는 클립만 물어
+                # 대상이 13건이었고, 지금은 앵커 샷 유형으로 걸러 대상이 한 자리다.
+                # 다시 켤 근거가 생기면 그때 켜고/끈 결과를 나란히 놓고 정한다.
                 return await llm.chat(
-                    prompts.START_SYSTEM, prompts.start_user([row]), thinking=True,
+                    prompts.START_SYSTEM, prompts.start_user([row]), thinking=False,
                     trace=st.get("trace"), name=f"refine_start_bound[{row['scene_id']}]")
             except Exception as e:                   # noqa: BLE001 — 건별 격리
                 log.warning("refine_start_bound 실패(장면%d 경계 유지): %s", row["scene_id"], e)
@@ -262,10 +277,33 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
     return g.compile()
 
 
+def _skipped(st: ComposeState, node: str, clips: list[dict], why: str) -> dict:
+    """할 일이 없어 건너뛴 노드도 트레이스에 남긴다 (2026-08-24).
+
+    구 배선은 조기 반환이 `tr.node()` 앞에 있어 이 노드가 트레이스에서 통째로
+    사라졌다. 그래서 **"돌았는데 할 게 없었다"와 "아예 안 돌았다"가 구분되지 않았다** —
+    refine_start_bound 가 게이트 조건 때문에 대상 0건으로 놀고 있던 걸 comp37~39
+    어디에서도 알 수 없었던 이유다. 침묵이 성공처럼 보이는 자리를 없앤다.
+    """
+    log.info("%s 건너뜀: %s", node, why)
+    if tr := st.get("trace"):
+        tr.node(node, asked=0, skipped=why)
+    out: dict = {"clips": clips}
+    if node == "refine_start_bound":
+        out["status"] = "ok"
+    return out
+
+
 def _label_filter(term: str) -> str:
-    """메타 필터 한 항목 → Milvus 표현식. 태그·라벨 어느 쪽에 있어도 걸리게."""
+    """메타 필터 한 항목 → Milvus 표현식. 네 축 어디에 있어도 걸리게.
+
+    축이 넷으로 갈렸다 (2026-08-23 상류 개편): 행위 태그(tags) · 파생 라벨(labels) ·
+    판세(game_context) · 전광판 사실(board_tags). 앞 둘만 보면 '역전'·'동점' 같은
+    질의가 조용히 무필터가 된다 — 그 말들이 labels 에서 game_context 로 이사했다.
+    """
     safe = term.replace('"', "")
-    return f'(tags like "%{safe}%" or labels like "%{safe}%")'
+    return (f'(tags like "%{safe}%" or labels like "%{safe}%" '
+            f'or game_context like "%{safe}%" or board_tags like "%{safe}%")')
 
 
 def _dedup_hits(hits: list[dict]) -> list[dict]:

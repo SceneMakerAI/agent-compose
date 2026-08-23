@@ -31,7 +31,13 @@ log = get_logger(__name__)
 
 
 def _anchor(r: dict, shots: list[dict]) -> dict | None:
-    """앵커 샷 — ★pitch_sec 이 속한 샷, 없으면 구간 안 첫 '투구' 샷 (모듈 docstring ①②)."""
+    """앵커 샷 — ★pitch_sec 이 속한 샷, 없으면 구간 안 첫 '투구' 샷 (모듈 docstring ①②).
+
+    앵커가 잡혔다고 그 시작이 투구인 건 아니다. 상류가 고른 대표 투구(pitch_time)가
+    든 샷을 그대로 쓰므로, 그 샷의 유형이 '투구'가 아닐 수 있다 — 실측 406장면 중
+    61%(리액션 219·타구/수비 16·광고 4·기타 4·주루 3·미분류 1)가 그렇다. 그래서
+    호출자가 판단할 수 있게 `anchor_type` 을 함께 낸다 (bounds.start_rows 의 게이트).
+    """
     anchor = None
     if r["pitch_sec"] is not None:
         anchor = next((s for s in shots if s["s"] <= r["pitch_sec"] < s["e"]), None)
@@ -65,6 +71,7 @@ def clip(r: dict, segs: list[dict], utts: list[tuple[float, float, str]] = ()) -
         picked = shots[shots.index(anchor):]
         ce, snapped = _snap_tail(hi, utts)
         return {"cs": max(anchor["s"], lo), "ce": ce, "anchor": (anchor["s"], anchor["e"]),
+                "anchor_type": anchor["shot_type"],
                 "shots": [(s["s"], s["e"], s["shot_type"]) for s in picked],
                 "mode": "끝 통째(레시피 제외 태그)" + ("+대사꼬리" if snapped else "")}
 
@@ -95,6 +102,7 @@ def clip(r: dict, segs: list[dict], utts: list[tuple[float, float, str]] = ()) -
     ce, floored = _obs_floor(ce, r.get("obs_sec"), shots, hi)
     ce, snapped = _snap_tail(ce, utts)
     return {"cs": cs, "ce": ce, "anchor": (anchor["s"], anchor["e"]),
+            "anchor_type": anchor["shot_type"],
             "shots": [(s["s"], s["e"], s["shot_type"]) for s in picked],
             "mode": "레시피" + ("+관측하한" if floored else "")
                     + ("+대사꼬리" if snapped else "")}

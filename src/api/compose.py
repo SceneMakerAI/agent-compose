@@ -27,7 +27,7 @@ from db.status_repo import (
     COMPOSE_RENDER,
     COMPOSE_VERIFY,
 )
-from flow import players
+from flow import plan, players
 from flow.graph import run_compose
 from flow.state import Inventory
 from log import bind_v_id, get_logger
@@ -115,21 +115,24 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
     """인벤토리 스냅샷 → run_compose → 클립 요약 + t_compose 저장."""
     repo: SourceRepo = st.repo
     scenes = await repo.fetch_scenes(req.v_id)
-    
+
     if not scenes:
         raise ValueError(
-            f"t_scene_baseball(source='board') 이 비어 있음 — publish 선행 필요 (v_id={req.v_id})")
-    
+            f"t_scene_baseball 이 비어 있음 — vision3 scene 선행 필요 (v_id={req.v_id})")
+
     segs = [{"seg_id": i, **r} for i, r in enumerate(await repo.fetch_shots_all(req.v_id), 1)]
     utts = tuple(await repo.fetch_utterances(req.v_id))
     # 타자 이름은 하단 자막에서 — 선수 질의를 벡터 검색이 아니라 인벤토리로 풀기 위한 재료
     players.annotate_batters(scenes, await repo.fetch_etc_rows(req.v_id))
-    parts = scenes[0]["score"].split()
+    # 팀명은 전광판 자막이 유일한 출처다 (발행본의 score 컬럼 폐기 — repos.fetch_teams).
+    # 못 읽으면 팀 없이 간다 — 관점("초=원정") 규칙은 이닝만으로도 선다.
+    teams = await repo.fetch_teams(req.v_id)
+    game_line = (f"v_id={req.v_id}  {teams[0]}(원정) vs {teams[1]}(홈)" if teams
+                 else f"v_id={req.v_id}  (팀명 판독 없음)")
     inv = Inventory(
         v_id=req.v_id, scenes=tuple(scenes), segs=tuple(segs), utts=utts,
-        game_line=f"v_id={req.v_id}  {parts[0]}(원정) vs {parts[2]}(홈)",
+        game_line=game_line,
         pitches=tuple(await repo.fetch_pitch_windows(req.v_id)),  # refine_bounds 후보 재료
-        trans=tuple(await repo.fetch_transitions(req.v_id)),  # score_match 사실 근거
     )
     tr = Trace(st.settings.trace_dir, req.v_id, req.query)
 
@@ -223,11 +226,22 @@ def _clip_row(r: dict) -> dict:
     시작을 저장 직전에 되돌리는 셈이었다 (v201 comp24 실측: 16클립 중 '투구' 시작 0건).
     컬럼은 time(3) 이고 SEC_TO_TIME 이 밀리초를 그대로 받는다.
     """
-    before, after = r["score_before"] or "?", r["score"].split()[1] if r["score"] else "?"
     return {
-        "scene_id": r["scene_id"], "h_id": r["h_id"],
+        "scene_id": r["scene_id"],
+        # h_id 는 더 이상 채우지 않는다 — 상류 원장 키가 h_id→p_id 로 바뀌었고
+        # p_id 는 scene_id 와 같은 값이라 별도 칸에 담을 것이 없다. 컬럼은 하류
+        # 소비자를 위해 남겨 둔다 (nullable).
+        "h_id": None,
         "start": r["cut"]["cs"], "end": r["cut"]["ce"],
-        "label": r["scene_type"], "labels": r["labels"] or "",
-        "inning": r["inning"] or "", "score_before": before, "score_after": after,
+        # 판세(game_context)를 라벨 끝에 잇는다 — 구 스키마에선 '역전'·'동점'이
+        # t_scene.labels 안에 있어 이 칸으로 그대로 흘렀다. 축이 갈린 뒤 안 이으면
+        # 편성 결과에서 가장 신호가 센 표기가 통째로 사라진다. 이 칸은 표시용이라
+        # (compose_repo.fetch 가 원문 그대로 돌려주고 코드가 다시 파싱하지 않는다)
+        # 두 축을 한 문자열에 담아도 되는 유일한 자리다.
+        "label": ",".join(r["tags"]),
+        "labels": ",".join(r["label_list"] + ([r["game_context"]]
+                                              if r.get("game_context") else [])),
+        "inning": r["inning"] or "",
+        "score_before": r["score_before"] or "?", "score_after": plan.score_after(r),
         "cut_mode": r["cut"]["mode"],
     }

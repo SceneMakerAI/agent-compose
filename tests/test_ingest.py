@@ -8,9 +8,12 @@ from vector.ingest import build_rows, chunk_stt, merge_etc, owner_of
 
 
 def scene(scene_id, s, e, **kw):
-    return {"scene_id": scene_id, "h_id": scene_id, "s": float(s), "e": float(e),
+    """발행본 행 흉내 — 키는 SourceRepo.fetch_scenes 산출과 같아야 한다."""
+    return {"scene_id": scene_id, "s": float(s), "e": float(e),
             "tags": kw.get("tags", ["안타"]), "label_list": kw.get("labels", []),
-            "score_delta": kw.get("delta", 0), "inning": kw.get("inning", "1회 초")}
+            "board_tags": kw.get("board_tags", ["1루"]),
+            "game_context": kw.get("game_context"),
+            "score_delta": kw.get("delta", 0), "inning": kw.get("inning", "1회초")}
 
 
 # ── chunk_stt ──────────────────────────────────────────
@@ -65,8 +68,25 @@ def test_build_rows_orphan_kept_and_fields():
           ("stt", 500.0, 505.0, "", "장면 밖 해설")]              # 어느 장면과도 무관
     rows = build_rows(7, SCENES, ev)
     assert rows[0]["scene_id"] == 1 and rows[0]["shot_type"] == "투구"
-    assert rows[1]["scene_id"] == -1 and rows[1]["h_id"] == -1   # orphan 도 버리지 않는다
+    assert rows[1]["scene_id"] == -1                             # orphan 도 버리지 않는다
+    # orphan 은 귀속 메타가 전부 빈 값 — 남의 장면 사실이 새면 검색 필터가 오작동한다
+    assert rows[1]["tags"] == rows[1]["labels"] == ""
+    assert rows[1]["board_tags"] == rows[1]["game_context"] == ""
     assert all(r["v_id"] == 7 for r in rows)
+
+
+def test_build_rows_carries_four_meta_axes():
+    """네 축(행위·파생·판세·전광판 사실)이 각자 칸으로 실린다 — 2026-08-23 상류 개편.
+
+    labels 한 칸에 섞여 오는 해석을 repo 가 둘로 가르고(vocab.split_labels),
+    전광판 사실은 별도 컬럼에서 온다. 색인이 이걸 하나로 뭉치면 '역전'·'아웃' 같은
+    메타 필터가 어느 축인지 모른 채 걸린다.
+    """
+    sc = scene(1, 100, 130, tags=["안타"], labels=["적시타"],
+               board_tags=["1루", "주자득점", "1점"], game_context="역전")
+    row = build_rows(7, [sc], [("stt", 105.0, 110.0, "", "역전 적시타")])[0]
+    assert row["tags"] == "안타" and row["labels"] == "적시타"
+    assert row["board_tags"] == "1루,주자득점,1점" and row["game_context"] == "역전"
 
 
 # ── _trunc_bytes (Milvus VARCHAR 바이트 한도) ──────────

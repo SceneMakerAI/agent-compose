@@ -146,26 +146,54 @@ def test_render_situation():
     assert render_situation(1, None) == "?"
 
 
-def test_render_inventory_carries_situation_and_team():
-    """상황·팀명이 실제로 한 줄에 실린다 — 둘 다 라벨로는 표현되지 않는 정보."""
+def _inv_row(**kw):
+    """인벤토리 렌더 입력 — 키는 SourceRepo.fetch_scenes 산출과 같아야 한다."""
+    row = {"scene_id": 65, "tags": ["범타"], "label_list": [], "board_tags": ["아웃"],
+           "game_context": None, "inning": "8회말", "score_before": "9-7",
+           "score_delta": 0, "s": 100.0, "e": 114.0, "outs": 0, "bases": "100"}
+    return {**row, **kw}
+
+
+def test_render_inventory_carries_situation():
+    """상황(아웃·주자)이 실제로 한 줄에 실린다 — 라벨로는 표현되지 않는 정보."""
     from flow.plan import render_inventory
 
-    rows = [{"scene_id": 65, "scene_type": "범타", "labels": "", "inning": "8회 말",
-             "score": "삼성 9-7 롯데", "score_before": "9-7", "s": 100.0, "e": 114.0,
-             "outs": 0, "bases": "100", "away_team": "삼성", "home_team": "롯데"}]
-    block = render_inventory(rows)
+    block = render_inventory([_inv_row()])
     assert "- 아웃: 0" in block and "- 주자: 1루" in block
-    assert "- 점수상황: 9-7 -> 9-7" in block
+    assert "- 점수상황: 9-7" in block and "->" not in block   # 무득점은 전개 없음
     assert "[장면 65]" in block
 
 
-def test_render_inventory_survives_missing_transition():
-    """전이 조인이 비어도(병합·판독 공백) 렌더가 죽지 않는다."""
+def test_render_inventory_shows_scoring_and_context():
+    """득점은 전개로, 판세는 제 줄로 — 판세는 labels 에서 game_context 로 이사했다."""
     from flow.plan import render_inventory
 
-    rows = [{"scene_id": 1, "scene_type": "범타", "labels": "", "inning": "1회 초",
-             "score": "", "score_before": None, "s": 0.0, "e": 10.0,
-             "outs": None, "bases": None, "away_team": None, "home_team": None}]
+    block = render_inventory([_inv_row(score_delta=2, label_list=["적시타"],
+                                       game_context="역전")])
+    assert "- 점수상황: 9-7 -> 9-9" in block          # 8회'말' = 홈 공격
+    assert "- 라벨: 적시타" in block and "- 판세: 역전" in block
+
+
+def test_render_inventory_keeps_board_facts_when_unjudged():
+    """해석이 비어도 전광판 사실은 남는다 — 그게 tags 컬럼의 존재 이유다.
+
+    실측 v200~203 에 labels 가 NULL 인 행이 12개 있다. 사실까지 빠지면 그 장면은
+    인벤토리에서 태그 없는 빈칸이 돼 선곡 후보에조차 못 오른다.
+    """
+    from flow.plan import render_inventory
+
+    block = render_inventory([_inv_row(tags=[], label_list=[],
+                                       board_tags=["아웃", "주자아웃"])])
+    assert "- 태그: 판별불가" in block
+    assert "- 전광판: 아웃,주자아웃" in block
+
+
+def test_render_inventory_survives_missing_board():
+    """전광판 조인이 비어도(판독 공백) 렌더가 죽지 않는다."""
+    from flow.plan import render_inventory
+
+    rows = [_inv_row(scene_id=1, score_before=None, inning=None,
+                     outs=None, bases=None, board_tags=[])]
     assert "?" in render_inventory(rows)
 
 

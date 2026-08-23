@@ -55,6 +55,11 @@ COINCIDE_SEC = 2.0
 # 후보로 쓰지 않는 샷 유형 — 광고 경계를 클립 끝으로 삼으면 중계가 아닌 데서 끊긴다.
 # (v201 장면5 실측: 끝 후보 넷 중 하나가 광고 경계였다.)
 SKIP_SHOT_TYPES = frozenset({"광고"})
+# 시작을 그대로 믿는 앵커 샷 유형 — 이 화면이면 시작 보정을 묻지 않는다.
+# '투구'는 그 자체로 맞고, '리액션'은 타석 준비 화면이라 투구 직전일 수 있다.
+# 나머지(타구·수비·주루·득점·홈인·광고·기타·미분류·앵커 없음)는 시작이 이미
+# 플레이 도중이거나 중계가 아닌 화면이라 묻는다 — start_rows docstring 의 실측 근거.
+TRUSTED_ANCHOR_SHOTS = frozenset({"투구", "리액션"})
 
 
 def _shot_at(sec: float, segs: list[dict], at_end: bool = False) -> dict | None:
@@ -147,35 +152,42 @@ def _dedup(cands: list[dict], drop_sig: tuple | None = None,
 # ──────────────────────────────────────────────────────
 
 def end_candidates(clip: dict, segs: list[dict], utts: list) -> list:
-    """끝 후보 [(초, 설명)] — 발화 끝과 샷 경계를 함께 준다. **현재 끝 이후만**.
+    """끝 후보 [(초, 설명)] — **창 안의 샷 끝을 전부** 낸다. 현재 끝 이후만.
 
-    둘이 COINCIDE_SEC 안에 겹치면 그렇게 표시한다: 말도 끝나고 화면도 바뀌는 지점이
-    가장 깔끔한 끝점인데, 그 정보가 없으면 모델이 알 수 없다.
+    2026-08-24 재설계. 이전에는 발화 끝과 샷 끝을 섞어 종류 우선으로 CAND_MAX(4)까지
+    자르고 5초 이내를 접었다. 그 결과 클립당 최종 후보가 평균 1.4개로 줄어 "고르기"가
+    아니라 이지선다가 됐다 (comp37 실측: 후보 1개인 클립이 8/10).
 
-    **상한 절단은 시간순이 아니라 종류 우선**이다. 시간순으로 자르면 앞쪽에 몰린 화면
-    전환이 자리를 다 먹고 뒤쪽의 발화 끝이 잘려나간다 — v201 장면5 실측: 후보가
-    1355·1357·1359·1361(전부 화면 전환, 하나는 광고)만 남고 유일한 정답인 발화 끝
-    1365 가 버려졌다. 규칙은 "해설이 끝나는 지점"인데 그걸 고를 수가 없었다.
+    **샷 끝이 후보의 기준인 이유**: 클립이 실제로 끊기는 자리는 화면이 바뀌는 자리다.
+    샷 한복판에서 자르면 다음 장면이 한 조각 붙거나 동작이 잘린다. 발화 끝은 그
+    자체로 컷 지점이 아니라 "여기서 말이 끝난다"는 **근거**다 — 그래서 후보의 설명에
+    병기하고, 컷 좌표는 샷 경계를 쓴다.
+
+    발화 끝도 후보로 남긴다(샷 끝과 겹치지 않는 것만): 창 안에 샷 경계가 하나도 없는
+    클립이 있어서다 (comp38 장면48 실측 — 샷만 내면 후보 0건이라 이 단계를 통째로
+    건너뛴다). 다만 순서는 샷이 먼저다.
+
+    상한·근접 접기는 없앴다. 후보가 많아 생기던 비용(우열 근거가 약할 때 thinking 폭주)은
+    이 단계의 thinking 을 끄면서 사라졌다 — 근거는 graph.refine_end_bound_node 주석.
     """
     ce = clip["cut"]["ce"]
     hi = ce + END_MAX_EXT_SEC
     utt_ends = [math.ceil(ue) for _us, ue, _t in utts if ce < ue <= hi]
     shot_ends = [s["e"] for s in segs
                  if ce < s["e"] <= hi and s.get("shot_type") not in SKIP_SHOT_TYPES]
-    speech: list[tuple[float, str]] = []
-    screen: list[tuple[float, str]] = []
-    for ue in utt_ends:
-        near = any(abs(ue - se) <= COINCIDE_SEC for se in shot_ends)
-        speech.append((float(ue), "발화 끝 + 화면 전환" if near else "발화 끝"))
-    for se in shot_ends:
-        if not any(abs(ue - se) <= COINCIDE_SEC for ue in utt_ends):
-            screen.append((float(se), "화면 전환"))
-    # 발화 끝을 먼저 채우고 남는 자리만 화면 전환으로 (개수는 CAND_MAX 그대로).
-    out = sorted(speech)[:CAND_MAX] + sorted(screen)[:max(0, CAND_MAX - len(speech))]
+
+    out: list[tuple[float, str]] = []
+    for se in sorted(shot_ends):
+        near = any(abs(ue - se) <= COINCIDE_SEC for ue in utt_ends)
+        out.append((float(se), "화면 전환 + 발화 끝" if near else "화면 전환"))
+    for ue in sorted(utt_ends):
+        if not any(abs(ue - se) <= COINCIDE_SEC for se in shot_ends):
+            out.append((float(ue), "발화 끝"))
+
     uniq: dict[int, tuple[float, str]] = {}
-    for sec, why in sorted(out):
+    for sec, why in out:                       # 같은 정수 초는 하나 (샷 우선 — 먼저 넣었다)
         uniq.setdefault(int(sec), (sec, why))
-    return sorted(uniq.values())[:CAND_MAX]
+    return sorted(uniq.values())
 
 
 def end_rows(clips: list[dict], segs: list[dict], utts: list) -> list[dict]:
@@ -190,14 +202,24 @@ def end_rows(clips: list[dict], segs: list[dict], utts: list) -> list[dict]:
         cs, ce = c["cut"]["cs"], c["cut"]["ce"]
         raw = [{"sec": sec, "why": why, **_ctx(sec, segs, utts, at_end=True)}
                for sec, why in end_candidates(c, segs, utts)]
-        # 서명이 같으면 '발화 끝' 쪽을 남긴다 — 그게 규칙이 고르라는 지점이다.
-        ends = sorted(_dedup(sorted(raw, key=lambda e: (0 if "발화" in e["why"] else 1, e["sec"])),
-                             near=MERGE_GAP_SEC),
-                      key=lambda e: e["sec"])
+        # 현재와 구별되지 않는 후보를 뺀다 — 단 **발화 끝 후보만**이다.
+        #
+        # 샷 경계 후보는 설명이 현재와 같아도 지우면 안 된다: 현재 끝이 샷 한복판이면
+        # 그 샷의 끝은 화면·해설이 당연히 같고(같은 샷이니까), 그런데도 "샷을 끝까지
+        # 보고 자른다"는 **다른 선택**이다. 후보 줄의 '화면 전환' 표기가 그 차이를
+        # 모델에게 이미 보여 준다. 서명으로 지우면 샷 스냅이 통째로 사라진다.
+        #
+        # 발화 끝 후보는 다르다. 화면도 안 바뀌고 해설도 같으면 정말 아무것도 아니고,
+        # 그 답은 이미 "유지"다. (comp38 실측: 후보 14개 중 6개가 현재와 해설 동일.)
+        cur = _ctx(ce, segs, utts, at_end=True)
+        cur_sig = _sig(cur)
+        raw = [e for e in raw
+               if e["why"] != "발화 끝" or _sig(e) != cur_sig]
+        ends = sorted(_dedup(raw), key=lambda e: e["sec"])
         if ends:
             rows.append({"scene_id": c["scene_id"], "tags": c["tags"],
                          "inning": c.get("inning") or "", "cs": cs, "ce": ce,
-                         "cur": _ctx(ce, segs, utts, at_end=True), "ends": ends})
+                         "cur": cur, "ends": ends})
     return rows
 
 
@@ -253,11 +275,21 @@ def _window(items: list, lo: float, hi: float, key_s, key_e) -> list:
 
 def start_rows(clips: list[dict], segs: list[dict], utts: list,
                pitches: list[tuple[int, int]]) -> list[dict]:
-    """refine_start_bound 에 낼 행 — **투구 앵커가 없는 클립만**.
+    """refine_start_bound 에 낼 행 — **시작이 못 미더운 클립만**.
 
-    앵커가 잡힌 클립은 cut 이 정한 시작이 이미 그 플레이의 투구 샷이다(실측
-    2026-08-20: v200 66/67 · v201 66/71 · v202 51/56 이 '투구' 시작). 그걸 모델이
-    되돌리는 쪽이 손해였다 — v201 comp20 의 장면9(-33s)·42(-37.3s).
+    게이트가 "앵커 유무"에서 "앵커 샷의 유형"으로 바뀌었다 (2026-08-24). 구 조건은
+    앵커만 잡히면 건너뛰었고 그 근거는 실측이었다(2026-08-20: v200 66/67 · v201
+    66/71 · v202 51/56 이 '투구' 시작). **그 실측이 구 상류 기준이라 더 이상 성립하지
+    않는다** — 지금은 상류가 대표 투구(pitch_time)를 골라 주고 cut 이 그 초가 든 샷을
+    앵커로 쓰는데, 그 샷의 61%가 투구 화면이 아니다(406장면: 리액션 219·타구/수비
+    16·광고 4·기타 4·주루 3·미분류 1). 조건이 그대로 남아 이 노드는 대상 0건으로
+    조용히 놀고 있었다.
+
+    그렇다고 전부 묻지는 않는다. 샷 분류가 25%만 채워져 있어(v201 4,013샷 중 1,000)
+    '리액션'이 진짜 리액션인지 투구 오분류인지 갈리지 않고, 맞는 시작을 되돌리는
+    사고가 실재한다 — v201 comp20 의 장면9(-33s)·42(-37.3s). 그래서 **투구일 수 있는
+    화면**(투구·리액션=타석 준비)은 믿고 넘기고, 명백히 아닌 것만 묻는다:
+    타구·수비·주루·득점·홈인(이미 플레이 도중) · 광고(중계가 아님) · 미분류 · 앵커 없음.
 
     행에는 후보 초 목록과 함께 **후보~현재 구간의 대사·화면을 통째로** 싣는다
     (2026-08-20 형식 변경). 후보마다 그 시각의 한 줄만 붙이던 방식은 후보의 화면
@@ -266,7 +298,7 @@ def start_rows(clips: list[dict], segs: list[dict], utts: list,
     """
     rows = []
     for c in clips:
-        if c["cut"].get("anchor") is not None:
+        if c["cut"].get("anchor_type") in TRUSTED_ANCHOR_SHOTS:
             continue
         cs, ce = c["cut"]["cs"], c["cut"]["ce"]
         cands = start_candidates(c, segs, pitches)
@@ -289,14 +321,6 @@ def start_rows(clips: list[dict], segs: list[dict], utts: list,
 # 처분 — 제시한 후보와 일치할 때만 적용
 # ──────────────────────────────────────────────────────
 
-# 숫자 뒤 단위 표기를 허용한다 — 모델마다 다르게 붙인다. Qwen3.8 은 "끝 9303s",
-# Qwen3.6 은 "끝 1355초" 로 답한다(2026-08-20 전환 실측). 단위를 안 받으면 줄 전체가
-# 매칭에 실패해 **조용히 무시**되고, 로그엔 "이동 0건"으로만 남아 모델 탓인지 파싱
-# 탓인지 구분되지 않는다.
-_UNIT = r"(?:초|s|sec)?"
-_END_LINE = re.compile(rf"장면\s*(\d+)\s*[:：]\s*(?:끝\s*)?(유지|\d+){_UNIT}")
-
-
 def _match(cands: list[dict], sec: int) -> float | None:
     """모델이 답한 정수 초 → 그 후보의 **실제 초(소수 포함)**. 없으면 None.
 
@@ -308,60 +332,63 @@ def _match(cands: list[dict], sec: int) -> float | None:
     return next((c["sec"] for c in cands if int(c["sec"]) == sec), None)
 
 
-def _apply(clips: list[dict], rows: list[dict], text: str, *,
-           field: str, key: str, pattern: re.Pattern, label: str) -> list[str]:
-    """제안 처분 공통 — 제시한 후보의 초 값과 일치할 때만 적용(그 외는 기각)."""
-    shown = {r["scene_id"]: r for r in rows}
-    by_id = {c["scene_id"]: c for c in clips}
-    moved: list[str] = []
-    for line in text.splitlines():
-        m = pattern.search(line.strip())
-        if not m:
-            continue
-        sid = int(m.group(1))
-        if sid not in shown or sid not in by_id or m.group(2) == "유지":
-            continue
-        row, cut_ = shown[sid], by_id[sid]["cut"]
-        new = int(m.group(2))
-        if (hit := _match(row[key], new)) is None:
-            log.info("bounds 기각: 장면%d %s %s (후보 밖)", sid, label, new)
-            continue
-        moved.append(f"장면{sid} {label} {cut_[field]:.1f}→{hit:.1f}")
-        cut_[field] = hit
-        cut_["mode"] += f"+{label}보정"
-    return moved
+def _apply_one(clips: list[dict], rows: list[dict], text: str, *,
+               field: str, key: str, label: str, by_index: bool) -> list[str]:
+    """제안 처분 공통 — 응답은 **값 하나 또는 "유지"** (장면 번호 없음).
 
+    클립 1건 = 콜 1건이라(refine_*_bound_node 가 행마다 따로 부른다) 번호가 없어도
+    어느 클립인지 모호하지 않다. 줄 형식이 어긋나면 응답 전체가 **조용히 무시**돼
+    로그엔 "이동 0건"으로만 남으므로, 앞에 군말이 붙어도 마지막 숫자를 답으로 읽는다.
 
-def apply_end(clips: list[dict], rows: list[dict], text: str) -> list[str]:
-    """끝 제안 처분 — 이동 기록을 돌려준다."""
-    return _apply(clips, rows, text, field="ce", key="ends", pattern=_END_LINE, label="끝")
+    by_index=True 면 그 숫자는 **후보 번호(1부터)** 다 (끝 — 2026-08-24). 모델에게
+    시각을 받아쓰게 하면 소수가 사라진다: 내부 좌표는 t_segment 경계라 소수를 갖고
+    있고(4369.3s = '투구' 샷 시작), 정수로 되돌리면 직전 샷 꼬리로 넘어간다. 번호로
+    받으면 원래 값을 그대로 되찾고, 지어낸 번호는 목록 밖이라 기각된다.
 
-
-def apply_start(clips: list[dict], rows: list[dict], text: str) -> list[str]:
-    """시작 제안 처분 — 응답은 **초 값 하나 또는 "유지"** (장면 번호 없음).
-
-    클립 1건 = 콜 1건이라 번호가 없어도 어느 클립인지 모호하지 않다. 후보 밖의 값은
-    기각한다 — 모델이 시각을 지어낼 수 없어야 한다.
+    by_index=False 면 숫자는 초다 (시작 — 아직 초 형식). 단위 표기(초·s·sec)는 붙든
+    안 붙든 받는다: 모델마다 다르게 붙인다 (Qwen3.8 "9303s" / Qwen3.6 "1355초" 실측).
     """
     if not rows:
         return []
     row = rows[0]
-    by_id = {c["scene_id"]: c for c in clips}
-    cut_ = by_id.get(row["scene_id"], {}).get("cut")
+    cut_ = next((c["cut"] for c in clips if c["scene_id"] == row["scene_id"]), None)
     if cut_ is None:
         return []
     body = text.strip()
     if "유지" in body:
         return []
-    m = re.search(r"(\d+)", body)
-    if not m:
-        log.info("bounds 기각: 장면%d 시작 응답 해석 불가 %r", row["scene_id"], body[:40])
+    nums = re.findall(r"\d+", body)
+    if not nums:
+        log.info("bounds 기각: 장면%d %s 응답 해석 불가 %r", row["scene_id"], label, body[:40])
         return []
-    new = int(m.group(1))
-    if (hit := _match(row["cands"], new)) is None:
-        log.info("bounds 기각: 장면%d 시작 %s (후보 밖)", row["scene_id"], new)
+    n = int(nums[-1])
+    cands = row[key]
+    if by_index:
+        if not 1 <= n <= len(cands):
+            log.info("bounds 기각: 장면%d %s 후보 번호 %s (1~%d 밖)",
+                     row["scene_id"], label, n, len(cands))
+            return []
+        hit = cands[n - 1]["sec"]
+    elif (hit := _match(cands, n)) is None:
+        log.info("bounds 기각: 장면%d %s %s (후보 밖)", row["scene_id"], label, n)
         return []
-    moved = [f"장면{row['scene_id']} 시작 {cut_['cs']:.1f}→{hit:.1f}"]
-    cut_["cs"] = hit
-    cut_["mode"] += "+시작보정"
+    moved = [f"장면{row['scene_id']} {label} {cut_[field]:.1f}→{hit:.1f}"]
+    cut_[field] = hit
+    cut_["mode"] += f"+{label}보정"
     return moved
+
+
+def apply_end(clips: list[dict], rows: list[dict], text: str) -> list[str]:
+    """끝 제안 처분 — 응답은 **후보 번호**. 이동 기록을 돌려준다."""
+    return _apply_one(clips, rows, text, field="ce", key="ends", label="끝", by_index=True)
+
+
+def apply_start(clips: list[dict], rows: list[dict], text: str) -> list[str]:
+    """시작 제안 처분 — 아직 **초 값**으로 받는다 (끝만 번호로 바꿨다, 2026-08-24).
+
+    같은 이유로 번호가 나은 자리지만, 이 노드는 현재 대상이 0건이라(상류가 대표 투구
+    있는 사건만 발행해 앵커가 전부 잡힌다) 프롬프트를 함께 바꿔도 검증할 실행이 없다.
+    시작 대상이 생기면 그때 끝과 같이 맞춘다.
+    """
+    return _apply_one(clips, rows, text, field="cs", key="cands", label="시작",
+                      by_index=False)

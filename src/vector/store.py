@@ -20,6 +20,13 @@ log = get_logger(__name__)
 # Qwen3-Embedding-4B 출력 차원 — 모델 교체 시 컬렉션 재생성 필요 (스키마 결합 상수)
 EMBED_DIM = 2560
 
+# 스키마 계약 — ensure_collection 이 만드는 필드 전체. 기존 컬렉션이 이보다 모자라면
+# 옛 스키마다 (2026-08-23 개편 전 컬렉션엔 board_tags·game_context 가 없다).
+_EXPECTED_FIELDS = frozenset({
+    "id", "v_id", "kind", "s", "e", "scene_id", "shot_type", "tags", "labels",
+    "board_tags", "game_context", "score_delta", "inning", "text", "vector",
+})
+
 # Qwen3-Embedding 권장: 질의에만 instruction 프리픽스, 문서는 원문 그대로.
 # 실측(bench4): "모음 3분" 같은 편성 문구가 섞여도 순위 유지 — 질의 전처리 없이 원문.
 QUERY_INSTRUCT = ("Instruct: 야구 중계의 해설 대사와 장면 설명에서 질의와 관련된 "
@@ -46,9 +53,25 @@ class VectorStore:
         self._top_k = settings.vector_top_k
 
     async def ensure_collection(self) -> None:
-        """컬렉션 없으면 생성 — 스키마는 bench4 docs/VECTOR.md 표와 1:1."""
+        """컬렉션 없으면 생성.
+
+        **스키마를 고치면 재생성이 필요하다** — pymilvus 는 필드 개명도 max_length
+        확대도 못 한다(add_collection_field 로 추가만 가능). 2026-08-23 상류 개편
+        대응은 그래서 drop + 전량 재색인으로 했다: h_id 제거(t_play_baseball 이
+        p_id 로 바뀌었고 scene_id 와 같은 값이라 중복), tags·labels 의미 재정의와
+        바이트 한도 상향, board_tags·game_context 신설.
+        """
         def _ensure() -> bool:
             if self._mc.has_collection(self._col):
+                got = {f["name"] for f in
+                       self._mc.describe_collection(self._col)["fields"]}
+                if missing := _EXPECTED_FIELDS - got:
+                    # fail-open 금지 — 여기서 안 막으면 insert 가 "unknown field"
+                    # 로 터지거나 search 의 output_fields 가 죽는다. 둘 다 발행 훅
+                    # 시점에 터져 원인이 상류로 보인다.
+                    raise RuntimeError(
+                        f"컬렉션 스키마 불일치: {self._col} 에 {sorted(missing)} 없음 "
+                        f"— drop 후 재색인 필요 (필드 개명·max_length 확대는 불가)")
                 return False
             # description 은 Attu 등 관리 도구에서 필드 의미를 읽는 유일한 통로다
             # (스키마만 보면 무슨 값인지 알 수 없다는 실측 — 2026-08-20).
@@ -69,23 +92,26 @@ class VectorStore:
             schema.add_field("scene_id", DataType.INT64,
                              description="귀속 장면 t_scene_baseball.scene_id — 겹침 최대 장면. "
                                          "겹치는 장면이 없으면 -1(orphan)")
-            schema.add_field("h_id", DataType.INT64,
-                             description="귀속 장면의 t_play_baseball.h_id — 원장 역추적용. "
-                                         "orphan 이면 -1")
             schema.add_field("shot_type", DataType.VARCHAR, max_length=16,
                              description="kind=shot 일 때 그 샷의 유형(투구·타구·수비·주루·리액션 등). "
-                                         "그 외 kind 는 빈 문자열")
-            schema.add_field("tags", DataType.VARCHAR, max_length=64,
+                                         "상류 컬럼명은 t_segment.scene_type. 그 외 kind 는 빈 문자열")
+            schema.add_field("tags", DataType.VARCHAR, max_length=128,
                              description="귀속 장면의 행위 태그 쉼표 나열(안타·홈런·범타 등) — "
-                                         "색인 시점 t_scene_baseball.scene_type 사본")
-            schema.add_field("labels", DataType.VARCHAR, max_length=64,
-                             description="귀속 장면의 파생 라벨 쉼표 나열(역전·적시타·병살 등) — "
-                                         "색인 시점 사본. orphan 은 빈 문자열")
+                                         "색인 시점 t_scene_baseball.labels 중 행위 축")
+            schema.add_field("labels", DataType.VARCHAR, max_length=128,
+                             description="귀속 장면의 파생 라벨 쉼표 나열(적시타·병살 등) — "
+                                         "색인 시점 t_scene_baseball.labels 중 파생 축. "
+                                         "orphan 은 빈 문자열")
+            schema.add_field("board_tags", DataType.VARCHAR, max_length=256,
+                             description="귀속 장면의 전광판 사실 태그(아웃·1루·주자득점 등) — "
+                                         "t_scene_baseball.tags 사본. 해석이 비어도 남는 축")
+            schema.add_field("game_context", DataType.VARCHAR, max_length=16,
+                             description="귀속 장면의 판세 변화 단일값(끝내기·선제·역전·동점). "
+                                         "판세가 안 바뀐 득점·무득점은 빈 문자열")
             schema.add_field("score_delta", DataType.INT16,
                              description="귀속 장면에서 난 득점 수 (0이면 무득점)")
-            schema.add_field("inning", DataType.VARCHAR, max_length=8,
-                             description="귀속 장면의 이닝 '{N}회 {초|말}' — 8바이트 한도라 "
-                                         "10회 이상은 절단된다(연장 미검증)")
+            schema.add_field("inning", DataType.VARCHAR, max_length=16,
+                             description="귀속 장면의 이닝 '{N}회{초|말}' (상류 표기 그대로)")
             schema.add_field("text", DataType.VARCHAR, max_length=1024,
                              description="증거 원문 — 이 필드만 임베딩된다. 1024바이트에서 절단")
             schema.add_field("vector", DataType.FLOAT_VECTOR, dim=EMBED_DIM,
@@ -125,14 +151,16 @@ class VectorStore:
         Summary:
             질의 벡터로 v_id 범위 검색 — 상위 top_k 히트 (엔티티 필드 포함).
         Returns:
-            list[dict]: {distance, kind, s, e, scene_id, shot_type, tags, labels, text}.
+            list[dict]: {distance, kind, s, e, scene_id, shot_type, tags, labels,
+                board_tags, game_context, text}.
         """
         def _search() -> list[dict]:
             hits = self._mc.search(
                 self._col, data=[query_vec], limit=self._top_k,
                 filter=f"v_id == {v_id}" + (f" and {extra}" if extra else ""),
                 output_fields=["kind", "s", "e", "scene_id", "shot_type",
-                               "tags", "labels", "text"])[0]
+                               "tags", "labels", "board_tags", "game_context",
+                               "text"])[0]
             return [{"distance": h["distance"], **h["entity"]} for h in hits]
 
         return await asyncio.to_thread(_search)

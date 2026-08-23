@@ -13,10 +13,19 @@ from flow import vocab
 
 
 def score(r: dict) -> int:
-    """장면 중요도 — 보드 사실(델타·라벨·태그·이닝)만으로 결정적 계산."""
+    """장면 중요도 — 보드 사실(델타·라벨·태그·판세·이닝)만으로 결정적 계산.
+
+    태그 가산은 **최대 하나**다 (합이 아니다 — 복수 태그 장면이 태그 수로 이기지
+    않게). 태그가 없는 장면이 있다: 상류 해석(labels)이 비면 `tags` 가 빈 목록이라
+    default=0 이 필요하다 — 구 스키마에선 `(scene_type or "").split(",")` 이 `[""]`
+    를 돌려줘 우연히 비지 않았을 뿐이고, 실측 v200~203 에 그런 행이 12개 있다.
+
+    판세 가산(game_context)은 **단일값 조회**다 — 상류가 우선순위대로 하나만 붙인다.
+    """
     s = r["score_delta"] * vocab.RANK_SCORE_DELTA_W
     s += sum(vocab.RANK_LABEL_BONUS.get(lab, 0) for lab in r["label_list"])
-    s += max(vocab.RANK_TAG_BONUS.get(t, 0) for t in r["tags"])
+    s += max((vocab.RANK_TAG_BONUS.get(t, 0) for t in r["tags"]), default=0)
+    s += vocab.RANK_CONTEXT_BONUS.get(r.get("game_context") or "", 0)
     inning_no = int(r["inning"].split("회")[0]) if r["inning"] else 1
     s += inning_no // 3                      # 이닝 가중 — 후반일수록 +1~+4
     return s

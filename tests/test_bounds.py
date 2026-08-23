@@ -75,9 +75,12 @@ def test_start_candidates_keep_clip_long_enough():
 
 
 def test_end_candidates_mark_coincidence():
-    """발화 끝과 화면 전환이 겹치면 표시한다 — 가장 깔끔한 끝점을 모델이 알게."""
+    """샷 끝에 발화 끝이 겹치면 표시한다 — 가장 깔끔한 끝점을 모델이 알게.
+
+    컷 좌표는 샷 경계이고 발화 끝은 그 자리를 고를 **근거**다 (2026-08-24 재설계).
+    """
     got = bounds.end_candidates(clip(ce=120.0), SEGS, UTTS)
-    assert any("발화 끝 + 화면 전환" in why for _sec, why in got)
+    assert any("화면 전환 + 발화 끝" in why for _sec, why in got)
 
 
 def test_apply_rejects_values_outside_candidates():
@@ -96,18 +99,26 @@ def test_apply_moves_when_candidate_matches():
     assert c["cut"]["cs"] == float(start) and moved
 
 
-def test_start_rows_skips_clips_with_pitch_anchor():
-    """cut 이 투구 앵커를 잡은 클립은 아예 묻지 않는다.
+def test_start_rows_gate_by_anchor_shot_type():
+    """게이트는 앵커 **유무**가 아니라 앵커 샷의 **유형**이다 (2026-08-24).
 
-    앵커가 있으면 cut 의 시작이 이미 그 플레이의 투구다. LLM 에 물으면 되돌리기만
-    했다 — v201 comp20 장면42 는 앵커 7510.3s 를 7473.0s('타구·수비' = 앞 타석)로
-    37초 물렀다.
+    구 조건(앵커만 있으면 건너뜀)은 "앵커가 있으면 시작이 곧 투구"라는 구 상류 실측에
+    기댔다. 지금은 상류가 대표 투구를 골라 주고 cut 이 그 초가 든 샷을 쓰는데 그 샷의
+    61%가 투구 화면이 아니다(406장면). 조건이 남아 이 노드가 대상 0건으로 놀았다.
+
+    '투구'·'리액션'(타석 준비)은 믿고, 이미 플레이 도중이거나 중계가 아닌 화면만 묻는다.
     """
-    anchored = clip(scene_id=1, cs=115.0, ce=120.0)
-    anchored["cut"]["anchor"] = (106.0, 112.0)
-    free = clip(scene_id=2, cs=115.0, ce=120.0)          # anchor 키 없음 = 앵커 없음
-    rows = bounds.start_rows([anchored, free], SEGS, UTTS, [(104, 106)])
-    assert [r["scene_id"] for r in rows] == [2]
+    def anchored(sid, shot_type):
+        c = clip(scene_id=sid, cs=115.0, ce=160.0)
+        c["cut"]["anchor"] = (106.0, 112.0)
+        c["cut"]["anchor_type"] = shot_type
+        return c
+
+    clips = [anchored(1, "투구"), anchored(2, "리액션"), anchored(3, "타구·수비"),
+             anchored(4, "광고"), anchored(5, None),
+             clip(scene_id=6, cs=115.0, ce=160.0)]        # anchor_type 키 없음 = 앵커 없음
+    rows = bounds.start_rows(clips, SEGS, UTTS, [(104, 106)])
+    assert [r["scene_id"] for r in rows] == [3, 4, 5, 6]
 
 
 def test_apply_keeps_candidate_fraction():
@@ -125,18 +136,29 @@ def test_apply_keeps_candidate_fraction():
     assert c["cut"]["cs"] == 108.3
 
 
-def test_end_candidates_keep_speech_over_screen_when_truncating():
-    """상한에 걸리면 화면 전환을 버리고 발화 끝을 남긴다.
+def test_end_candidates_give_every_shot_end_no_cap():
+    """창 안의 샷 끝은 **전부** 낸다 — 개수 상한도 근접 접기도 없다 (2026-08-24).
 
-    실측(v201 장면5): 시간순으로 자르니 앞쪽 화면 전환 넷이 자리를 다 먹고 유일한
-    정답인 발화 끝 1365s 가 버려졌다. 규칙은 "해설이 끝나는 지점"인데 고를 수가 없었다.
+    구 설계는 종류 우선으로 CAND_MAX(4)까지 자르고 5초 이내를 접어 클립당 최종 후보가
+    평균 1.4개로 줄었다 (comp37 실측: 후보 1개인 클립이 8/10 — 이지선다). 상한이
+    있던 이유(후보 우열이 약하면 thinking 폭주)는 이 단계의 thinking 을 끄면서 사라졌다.
     """
-    segs = [{"s": 120.0 + i, "e": 121.0 + i, "shot_type": "리액션", "summary": ""}
+    segs = [{"s": 120.0 + i, "e": 121.0 + i, "shot_type": "리액션", "summary": f"샷{i}"}
             for i in range(6)]                       # 끝 121·122·123·124·125·126
-    utts = [(118.0, 130.0, "결국에 이겨내네요")]      # 발화 끝 130 — 시간순이면 꼴찌
+    utts = [(118.0, 130.0, "결국에 이겨내네요")]      # 발화 끝 130 — 샷과 안 겹친다
     got = bounds.end_candidates(clip(ce=120.0), segs, utts)
-    assert 130 in [int(sec) for sec, _ in got], got
-    assert len(got) <= bounds.CAND_MAX
+    assert [int(sec) for sec, _ in got] == [121, 122, 123, 124, 125, 126, 130]
+    assert len(got) > bounds.CAND_MAX                # 상한에 안 걸린다
+
+
+def test_end_candidates_keep_speech_end_when_no_shot_boundary():
+    """창 안에 샷 경계가 없으면 발화 끝이 후보다 — 커버리지를 잃지 않는다.
+
+    실측(comp38 장면48): 12초 창 안 샷 끝이 0개였다. 샷만 내면 이 클립은 후보가 없어
+    끝 보정을 통째로 건너뛴다.
+    """
+    got = bounds.end_candidates(clip(ce=120.0), [], [(118.0, 128.0, "이겨내네요")])
+    assert [(int(x), w) for x, w in got] == [(128, "발화 끝")]
 
 
 def test_end_candidates_skip_ad_boundary():
@@ -179,17 +201,17 @@ def test_apply_start_keeps_when_model_says_stay():
     assert c["cut"]["cs"] == 115.0
 
 
-def test_apply_accepts_unit_suffix():
-    """숫자 뒤 단위 표기를 허용한다 — 모델마다 다르게 붙인다.
+def test_apply_end_maps_index_to_exact_candidate_second():
+    """끝 응답은 **후보 번호**이고, 적용은 그 후보의 소수 초로 한다 (2026-08-24).
 
-    Qwen3.8 은 "끝 9303s", Qwen3.6 은 "시작 1342초 끝 1355초" 로 답한다(전환 실측).
-    안 받으면 줄 전체가 매칭 실패해 조용히 무시되고 "경계 이동 0건"으로만 남는다.
+    초를 받아쓰게 하면 소수가 사라진다 — v201 은 t_segment 경계가 소수라 4369.3s
+    ('투구' 시작)와 4369s(직전 '리액션' 끝자락)가 서로 다른 샷이다. 구 형식
+    (`장면 1: 끝 128초`)은 폐기했다.
     """
-    for text, want in (("장면 1: 끝 128초", 128.0),
-                       ("장면 1: 끝 128s", 128.0),
-                       ("장면 1: 끝 128", 128.0)):
+    for text in ("1", "1번", "번호 1"):
         c = clip(cs=115.0, ce=120.0)
         rows = bounds.end_rows([c], SEGS, UTTS)
+        want = rows[0]["ends"][0]["sec"]
         bounds.apply_end([c], rows, text)
         assert c["cut"]["ce"] == want, text
 
@@ -203,11 +225,85 @@ _SEGS2 = [{"s": 90.0, "e": 130.0, "shot_type": "리액션", "summary": "타자�
 _UTTS2 = [(90.0, 130.0, "다른 문장이다"), (130.0, 200.0, "같은 문장이 계속된다")]
 
 
-def test_dedup_keeps_speech_end_over_screen():
-    """끝 후보가 겹치면 '발화 끝' 쪽을 남긴다 — 규칙이 고르라는 지점이다."""
+def test_end_rows_drop_speech_candidate_identical_to_current():
+    """현재와 화면·해설이 똑같은 **발화 끝** 후보는 뺀다 — 정말 아무것도 아니다.
+
+    샷이 창(+12s) 밖까지 이어져 샷 경계 후보가 없는 상황. 남는 건 발화 끝뿐인데
+    그마저 현재와 같으면 물어볼 게 없어 행 자체가 나오지 않는다.
+    """
+    segs = [{"s": 120.0, "e": 200.0, "shot_type": "리액션", "summary": "같은 화면"}]
+    utts = [(120.0, 136.0, "같은 해설")]
+    assert bounds.end_rows([clip(cs=100.0, ce=130.0)], segs, utts) == []
+
+
+def test_end_rows_keep_shot_boundary_even_if_description_matches():
+    """샷 경계 후보는 설명이 현재와 같아도 남는다 — 샷 스냅이 곧 그 선택이다.
+
+    현재 끝(130s)이 샷 한복판이라 그 샷의 끝(133s)은 같은 샷이라서 화면·해설이 당연히
+    같다. 그런데도 "샷을 끝까지 보고 자른다"는 다른 선택이고, 후보 줄의 '화면 전환'
+    표기가 그 차이를 보여 준다. 서명으로 지우면 이 설계의 핵심이 사라진다.
+    """
+    segs = [{"s": 120.0, "e": 133.0, "shot_type": "리액션", "summary": "같은 화면"},
+            {"s": 133.0, "e": 136.0, "shot_type": "타구·수비", "summary": "다른 화면"}]
+    utts = [(120.0, 136.0, "같은 해설")]
+    ends = bounds.end_rows([clip(cs=100.0, ce=130.0)], segs, utts)[0]["ends"]
+    assert [int(e["sec"]) for e in ends] == [133, 136]
+    assert ends[0]["shot"] == "같은 화면" and ends[0]["why"] == "화면 전환"
+
+
+def test_end_rows_fold_candidates_sharing_a_signature():
+    """후보끼리 화면·해설이 같으면 하나로 접는다 — 고를 근거가 프롬프트 안에 없다."""
     segs = [{"s": 120.0, "e": 133.0, "shot_type": "리액션", "summary": "같은 화면"},
             {"s": 133.0, "e": 136.0, "shot_type": "리액션", "summary": "같은 화면"}]
     utts = [(120.0, 136.0, "같은 해설")]
     got = bounds.end_rows([clip(cs=100.0, ce=130.0)], segs, utts)
-    whys = [e["why"] for e in got[0]["ends"]]
-    assert any("발화" in w for w in whys), whys
+    assert [int(e["sec"]) for e in got[0]["ends"]] == [133]
+
+
+# ── 처분 파서 — 응답 형식 (끝=번호 / 시작=초) ───────────
+
+def _clip(sid=47, cs=6696.0, ce=6761.0):
+    return {"scene_id": sid, "cut": {"cs": cs, "ce": ce, "mode": "레시피"}}
+
+
+ROW = {"scene_id": 47, "ends": [{"sec": 6769.4}, {"sec": 6781.0}],
+       "cands": [{"sec": 6690.3}]}
+
+
+def test_apply_end_takes_candidate_index():
+    """번호 1·2 가 각각 첫째·둘째 후보의 실제 초로 치환된다."""
+    for text, want in (("1", 6769.4), ("2", 6781.0)):
+        clips = [_clip()]
+        assert bounds.apply_end(clips, [ROW], text) == [f"장면47 끝 6761.0→{want}"]
+        assert clips[0]["cut"]["ce"] == want
+        assert clips[0]["cut"]["mode"].endswith("+끝보정")
+
+
+def test_apply_end_ignores_leading_prose():
+    """형식대로면 답은 맨 끝 숫자다 — 앞에 군말이 붙어도 답을 잃지 않는다."""
+    clips = [_clip()]
+    bounds.apply_end(clips, [ROW], "2번이 좋겠다.\n2")
+    assert clips[0]["cut"]["ce"] == 6781.0
+
+
+def test_apply_end_rejects_hold_unknown_and_offlist_index():
+    """유지·해석불가·목록 밖 번호는 **원 경계 유지**.
+
+    번호로 받으면 지어낸 값이 목록 밖으로 떨어져 시각을 지어내는 것보다 안전하다.
+    """
+    for text in ("유지", "잘 모르겠다", "3", "0", "9999"):
+        clips = [_clip()]
+        assert bounds.apply_end(clips, [ROW], text) == []
+        assert clips[0]["cut"]["ce"] == 6761.0
+        assert clips[0]["cut"]["mode"] == "레시피"
+
+
+def test_apply_start_still_takes_seconds():
+    """시작은 아직 초 값으로 받는다 — 끝만 번호로 바꿨다 (대상 0건이라 미검증).
+
+    단위 표기는 붙든 안 붙든 받는다 (Qwen3.8 "9303s" / Qwen3.6 "1355초" 실측).
+    """
+    for text in ("6690s", "6690초", "6690"):
+        clips = [_clip()]
+        assert bounds.apply_start(clips, [ROW], text) == ["장면47 시작 6696.0→6690.3"]
+        assert clips[0]["cut"]["cs"] == 6690.3
