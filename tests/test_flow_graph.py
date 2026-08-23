@@ -1,4 +1,5 @@
 """그래프 경로 검증 — 스텁 LLM/벡터로 3경로 + A1·A2·A3·B4 고정 (네트워크 없음)."""
+import re
 
 from flow.graph import build_graph, run_compose
 from flow.state import Inventory
@@ -241,3 +242,64 @@ def test_batter_pair_line_takes_batter():
 
     rows = [(10, "P 정철원 / 7 전병우 .229 2/3"), (15, "P 정철원 / 7 전병우 .229 2/3")]
     assert batter_of(rows, 20.0) == "전병우"
+
+
+# ── 예산 절단 (finish) — 2026-08-24 ─────────────────────
+
+def _bclip(sid, cs, ce, **kw):
+    """finish 절단이 보는 최소 형태 — rank.score 재료 + cut 좌표."""
+    return {"scene_id": sid, "tags": kw.get("tags", ["범타"]),
+            "label_list": kw.get("labels", []), "game_context": kw.get("ctx"),
+            "score_delta": kw.get("delta", 0), "inning": kw.get("inning", "1회초"),
+            "cut": {"cs": float(cs), "ce": float(ce), "mode": "레시피"}}
+
+
+def _finish(clips, budget=None):
+    """실제 구현(rank.fit_budget)을 그대로 부른다 — 로직을 복사하면 코드가 깨져도
+    테스트가 통과한다. finish_node 도 같은 함수를 쓴다."""
+    from flow import rank
+
+    picked, dropped = rank.fit_budget(clips, budget)
+    return [c["scene_id"] for c in picked], [int(re.search(r"장면(\d+)", d).group(1))
+                                             for d in dropped]
+
+
+def test_budget_drops_lowest_rank_first():
+    """예산을 넘치면 rank.score 낮은 것부터 버린다 — 큰 플레이가 남는다."""
+    clips = [_bclip(1, 0, 60, tags=["범타"]),                    # 점수 0
+             _bclip(2, 100, 160, tags=["홈런"], delta=1, ctx="역전"),  # 높음
+             _bclip(3, 200, 260, tags=["안타"], labels=["적시타"], delta=1)]
+    picked, dropped = _finish(clips, budget=120)
+    assert picked == [2, 3] and dropped == [1]
+
+
+def test_budget_output_stays_in_time_order():
+    """절단은 중요도 순으로 하되 **출력은 시간순**이다 — 편성은 경기 흐름대로 돈다."""
+    clips = [_bclip(9, 900, 960, tags=["범타"]),
+             _bclip(1, 100, 160, tags=["홈런"], delta=1)]
+    picked, _ = _finish(clips, budget=1000)
+    assert picked == [1, 9]
+
+
+def test_budget_never_fills_only_removes():
+    """예산에 미달해도 **채우지 않는다** — 폐기된 fill_budget 이 그 통로였다(94b58dc).
+
+    선곡에 없던 장면을 예산 채우려고 끌어오면 질의를 규칙이 덮어쓴다.
+    """
+    clips = [_bclip(1, 0, 30, tags=["범타"])]
+    picked, dropped = _finish(clips, budget=600)
+    assert picked == [1] and dropped == []          # 30s 뿐이어도 그대로
+
+
+def test_budget_keeps_at_least_one_clip():
+    """첫 클립이 예산보다 길어도 빈 편성을 내지 않는다."""
+    clips = [_bclip(1, 0, 300, tags=["홈런"], delta=1), _bclip(2, 400, 430)]
+    picked, dropped = _finish(clips, budget=60)
+    assert picked == [1] and dropped == [2]
+
+
+def test_no_budget_means_no_truncation():
+    """예산이 없으면 절단하지 않는다 — 선곡이 곧 편성이다."""
+    clips = [_bclip(i, i * 100, i * 100 + 90) for i in range(1, 6)]
+    picked, dropped = _finish(clips, budget=None)
+    assert len(picked) == 5 and dropped == []

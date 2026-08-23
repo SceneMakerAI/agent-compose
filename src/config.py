@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     # --- chat LLM (선곡·끝보정·검수 — text 전용) ---
     llm_base_url: str                   # 예: http://host:8002/v1
     llm_model: str = "qwen"
-    llm_timeout: float = 600.0   # thinking 가드(llm.THINK_TIMEOUT_SEC)보다 길어야 한다
+    llm_timeout: float = 1200.0   # thinking 가드(llm.THINK_TIMEOUT_SEC)보다 길어야 한다
     llm_thinking: bool = True           # 전역 스위치 — 끄면 그래프 전 콜 thinking 비활성
     # 동시 전송 상한 — 서버 --max-num-seqs 와 맞춘다. 배치 1 디코딩은 대역폭 병목이라
     # (가중치 27GB 를 토큰마다 읽는다) 동시 요청이 그 읽기를 나눠 쓴다. 실측 gpu-00:

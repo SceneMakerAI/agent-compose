@@ -121,6 +121,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         log.info("select_clips 응답: %r", text)
         spec = {
             "mode": "compose",
+            "budget": st.get("budget") or 0,        # t_compose.budget_sec 에 남는다
             # 대상 어휘는 rephrase_query 의 메타 필터 — 필수 장면 회수 범위를 가른다.
             "targets": list(st.get("filters") or []),
             "view": "전체",
@@ -232,13 +233,30 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         return {"clips": clips, "start_moved": moved}
 
     def finish_node(st: ComposeState) -> dict:
-        """마감 — 시간순 정렬 후 확정. 절단도 채점도 없다(선곡이 곧 편성이다)."""
-        picked = sorted(st.get("clips") or [], key=lambda c: c["cut"]["cs"])
+        """마감 — 예산 절단 후 시간순 확정. 채점은 없다(선곡이 곧 편성이다).
+
+        예산이 있으면 **rank.score 내림차순으로 담다가 넘치면 버린다** (2026-08-24).
+        구 fill_budget 과 다른 점이 결정적이다: 그건 예산을 채우려고 선곡에 없던
+        장면을 끌어와 "질의를 규칙이 덮어쓰는 통로"였다(94b58dc 폐기 사유). 여기는
+        **덜어내기만** 한다 — 모자라면 모자란 대로 둔다. 선곡이 관련 있는 것만
+        골랐다는 전제가 유지되고, 코드는 길이만 책임진다.
+
+        순위는 rank.score(득점·라벨·태그·판세·이닝)다. 질의 의도는 안 들어가지만,
+        여기 오는 건 이미 select_clips 가 질의로 걸러 낸 것들이라 남은 판단은
+        "그중 무엇이 더 큰 플레이인가"뿐이다. LLM 콜 0개로 재현 가능하다.
+
+        절단 후 **시간순으로 되돌린다** — 편성은 경기 흐름대로 재생돼야 한다.
+        """
+        budget = st.get("budget")
+        picked, dropped = rank.fit_budget(list(st.get("clips") or []), budget)
         total = sum(c["cut"]["ce"] - c["cut"]["cs"] for c in picked)
+        if dropped:
+            log.info("finish: 예산 %ds 절단 — %d건 버림 %s", budget, len(dropped), dropped)
         log.info("finish: 클립 %d건 %.0fs", len(picked), total)
         if tr := st.get("trace"):
-            tr.node("finish", picked=[c["scene_id"] for c in picked], total=round(total, 1))
-        return {"picked": picked, "total": round(total, 1),
+            tr.node("finish", picked=[c["scene_id"] for c in picked],
+                    total=round(total, 1), budget=budget, dropped=dropped)
+        return {"picked": picked, "total": round(total, 1), "dropped": dropped,
                 "status": "ok" if picked else "empty"}
 
     def route(st: ComposeState) -> str:
@@ -316,8 +334,8 @@ def _dedup_hits(hits: list[dict]) -> list[dict]:
     return sorted(best.values(), key=lambda h: -h["distance"])
 
 
-async def run_compose(graph, inv: Inventory, query: str, on_node=None,
-                      trace=None) -> ComposeState:
+async def run_compose(graph, inv: Inventory, query: str, budget: int | None = None,
+                      on_node=None, trace=None) -> ComposeState:
     """그래프 1회 실행 — stream 으로 노드 순서를 로그에 남기고 델타를 누적한다.
 
     on_node(node_name): 노드 완료 콜백 — API 가 job 진행 표시에 쓴다 (폴링 응답의
@@ -326,7 +344,7 @@ async def run_compose(graph, inv: Inventory, query: str, on_node=None,
     """
     state: ComposeState = {}
     async for step in graph.astream(
-            {"query": query, "inv": inv, "trace": trace},
+            {"query": query, "inv": inv, "trace": trace, "budget": budget},
             stream_mode="updates"):
         for node, upd in step.items():
             log.info(

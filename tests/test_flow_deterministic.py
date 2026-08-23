@@ -323,17 +323,17 @@ def test_plan_system_keeps_vocab():
     assert "{budget}" not in prompts.PLAN_SYSTEM     # 예산은 값으로 안 간다 — 질의 문구뿐
 
 
-def test_plan_system_asks_for_double_length():
-    """목표 시간의 **1.5배**로 고르라는 규칙이 있어야 한다.
+def test_plan_system_leaves_length_to_code():
+    """분량 산술은 모델 몫이 아니다 — 예산은 인자로 받아 finish 가 덜어낸다.
 
-    인벤토리의 '영상길이'는 장면 길이인데 실제 클립은 cut 이 좁혀 훨씬 짧다 —
-    실측(comp42 · 15분 요청): 모델은 901초(15.0분)를 골랐고 최종은 513초(8.6분).
-    이 줄이 빠지면 요청 분량의 절반짜리가 조용히 나온다.
+    배수 보정을 걸었다가 되돌린 자리다: 85장면 길이를 합산해 목표를 맞추는 산술이
+    select_clips 를 480초 가드 밖으로 밀었다(2배 comp43 · 1.5배 comp44 492초;
+    규칙 없는 comp42 는 204.8초 완주). 이 줄이 되살아나면 그 실패가 재현된다.
     """
     from flow import prompts
 
-    assert "1.5배" in prompts.PLAN_SYSTEM
-    assert "목표 시간이 없으면" in prompts.PLAN_SYSTEM   # 없을 때 규칙도 함께
+    assert "분량은 신경 쓰지 않습니다" in prompts.PLAN_SYSTEM
+    assert "배" not in prompts.PLAN_SYSTEM.split("4. 분량 규칙")[1].split("[출력")[0]
 
 
 def test_plan_system_closes_with_game_ending_out():

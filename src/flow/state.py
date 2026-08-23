@@ -42,6 +42,11 @@ class ComposeState(TypedDict, total=False):
     end_moved: list[str]     # 끝 이동 기록 (refine_end_bound)
     start_moved: list[str]   # 시작 이동 기록 (refine_start_bound)
     status: str              # ok | empty
+    budget: int | None       # 목표 분량(초) — finish 가 rank 순으로 절단할 때만 쓴다.
+                             # 선곡에는 관여하지 않는다: 예산으로 장면을 끌어오는 통로는
+                             # 폐기된 fill_budget 이 그랬고, 그게 질의를 규칙이 덮어쓰는
+                             # 자리였다(94b58dc). 여기 예산은 **덜어내기 전용**이다.
+    dropped: list[str]       # 예산 절단으로 버린 클립 기록 (리포트·트레이스용)
     # --- 재배선(2026-08-20) 추가 ---
     phrases: list[str]       # rephrase_query 검색어 (없으면 원 질의 하나)
     filters: list[str]       # rephrase_query 메타 필터 힌트 (태그·라벨)

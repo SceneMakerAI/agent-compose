@@ -36,3 +36,36 @@ def order(scenes: list[dict], picked: list[int]) -> list[dict]:
     by_id = {r["scene_id"]: r for r in scenes}
     rows = [dict(by_id[i]) for i in picked if i in by_id]
     return sorted(rows, key=lambda r: (-score(r), r["s"]))
+
+
+def fit_budget(clips: list[dict], budget: int | None) -> tuple[list[dict], list[str]]:
+    """
+    Summary:
+        예산(초)에 맞춰 클립을 덜어낸다 — (남길 것 시간순, 버린 기록).
+    Args:
+        clips (list[dict]): cut 좌표가 붙은 클립들.
+        budget (int | None): 목표 분량(초). None·0 이면 절단하지 않는다.
+    Returns:
+        tuple: (시간순 클립, "장면N(길이,점수)" 기록 목록).
+    Description:
+        - **덜어내기만 한다.** 모자라도 채우지 않는다 — 예산을 채우려고 선곡에 없던
+          장면을 끌어오는 건 폐기된 fill_budget 이 하던 일이고, 그게 "질의를 규칙이
+          덮어쓰는 통로"였다(94b58dc 폐기 사유).
+        - 버리는 순서는 score 오름차순(= 담는 순서가 내림차순)이다. 질의 의도는 이미
+          select_clips 가 걸렀으니 여기 남은 판단은 "그중 무엇이 더 큰 플레이인가"뿐.
+        - **최소 1건은 남긴다** — 첫 클립이 예산보다 길어도 빈 편성을 내지 않는다.
+        - 절단은 중요도 순으로 하되 **반환은 시간순**이다: 편성은 경기 흐름대로 돈다.
+    """
+    dropped: list[str] = []
+    if budget and clips:
+        kept: list[dict] = []
+        used = 0.0
+        for c in sorted(clips, key=lambda x: (-score(x), x["cut"]["cs"])):
+            length = c["cut"]["ce"] - c["cut"]["cs"]
+            if used + length <= budget or not kept:
+                kept.append(c)
+                used += length
+            else:
+                dropped.append(f"장면{c['scene_id']}({length:.0f}s,점수{score(c)})")
+        clips = kept
+    return sorted(clips, key=lambda c: c["cut"]["cs"]), dropped

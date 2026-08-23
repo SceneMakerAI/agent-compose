@@ -52,6 +52,11 @@ class ComposeRequest(BaseModel):
 
     v_id: int
     query: str
+    # 목표 분량(초). 없으면 절단하지 않는다 — 선곡이 곧 편성이다.
+    # 94b58dc 에서 없앴던 인자를 되살린다. 그때 뺀 이유는 예산이 필요 없어서가 아니라
+    # fill_budget 이 예산을 채우려고 선곡에 없던 장면을 끌어왔기 때문이다. 이번 예산은
+    # finish 에서 **덜어내기만** 한다 — 그 통로는 다시 열지 않는다.
+    budget_sec: int | None = None
     render: bool = False         # 원샷 옵션 — 편성 ok 면 이어서 mp4 렌더까지 (동기)
     bumper: bool = True          # render=True 일 때만 — 이닝 그룹 사이 범퍼
 
@@ -147,7 +152,8 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
             last_code = code
             await st.status.set(req.v_id, code)
 
-    state = await run_compose(st.graph, inv, req.query, on_node=on_node, trace=tr)
+    state = await run_compose(st.graph, inv, req.query, req.budget_sec,
+                              on_node=on_node, trace=tr)
 
     clips = [_clip_row(r) for r in state.get("picked", [])]
     comp_id = await st.compose_repo.save(
