@@ -28,6 +28,24 @@
 자리가 없다. 상한을 두면 같은 타석 투구가 버려진다 — 실측 37건(v1004 장면43 은 16초
 앞이라 1초 차로 탈락해 후보 0건, 그래서 물어보지도 못했다). 남은 제약은 클립을 잘라
 먹지 않는 것(MIN_CLIP_SEC)과 현재 시작과 같은 지점 병합(MERGE_GAP_SEC)뿐이다.
+
+**끝 창은 [그 플레이의 투구, 장면 끝 + END_OUT_EXT_SEC] 이다** (2026-08-24 재조정).
+두 끝을 다 옮겼다.
+
+*위쪽* — 상한이 장면 끝이던 동안 이 노드는 클립 4건 중 1건에서 침묵했다. 6경기
+477클립 실측에서 133건이 `ce >= e` 라 창이 비었고(그중 127건은 장면 끝 밖에 후보가
+있었다) 남은 343건만 물었다. 컷 끝이 장면 끝에 붙는 건 사고가 아니라 정상 경로다 —
+FULL_CLIP_TAGS(홈런·비디오 판독)는 끝을 장면 그대로 쓰고 관측 하한(_obs_floor)도
+장면 끝을 상한으로 민다. 그래서 발행 경계 밖으로 조금 나간다. 넘는 것 자체는 이
+변경이 처음도 아니다: cut._snap_tail 의 대사 꼬리가 이미 최대 9초를 넘긴다.
+
+*아래쪽* — 하한이 '현재 끝'이라 이 노드는 **늘리기 전용**이었다. 끝이 늦은 클립
+(리플레이·다음 타석 준비까지 물고 늘어진 컷)은 되돌릴 방법이 아예 없었다. 하한을
+그 플레이의 투구로 내리면 클립 안쪽 샷 경계도 후보가 되어 당기기가 가능해진다.
+투구보다 앞은 그 플레이가 시작되지도 않은 자리라 끝 후보일 수 없다.
+
+MIN_CLIP_SEC 은 여기서도 지킨다 — 투구 직후 1초짜리 후보를 고르면 플레이가 통째로
+사라진다. 시작 쪽 제약과 같은 값, 같은 이유다.
 """
 
 import math
@@ -52,6 +70,9 @@ MERGE_GAP_SEC = 5.0
 CAND_MAX = 4
 # 발화 끝과 샷 경계가 이 안에 함께 오면 "둘 다"로 표시한다 (가장 깔끔한 끝점).
 COINCIDE_SEC = 2.0
+# 끝 후보를 장면 끝(end_time) 밖으로 낼 폭 — 근거는 모듈 docstring.
+# 시작에는 없는 값이다(시작 후보는 장면 자신의 pitch_idxs 뿐이라 밖이 존재하지 않는다).
+END_OUT_EXT_SEC = 5.0
 # 후보로 쓰지 않는 샷 유형 — 광고 경계를 클립 끝으로 삼으면 중계가 아닌 데서 끊긴다.
 # (v201 장면5 실측: 끝 후보 넷 중 하나가 광고 경계였다.)
 SKIP_SHOT_TYPES = frozenset({"광고"})
@@ -184,7 +205,7 @@ def _dedup(cands: list[dict], drop_sig: tuple | None = None,
 # ──────────────────────────────────────────────────────
 
 def end_candidates(clip: dict, segs: list[dict], utts: list) -> list:
-    """끝 후보 [(초, 설명)] — **창 안의 샷 끝을 전부** 낸다. 현재 끝 이후만.
+    """끝 후보 [(초, 설명)] — **창 안의 샷 끝을 전부** 낸다.
 
     2026-08-24 재설계. 이전에는 발화 끝과 샷 끝을 섞어 종류 우선으로 CAND_MAX(4)까지
     자르고 5초 이내를 접었다. 그 결과 클립당 최종 후보가 평균 1.4개로 줄어 "고르기"가
@@ -202,23 +223,40 @@ def end_candidates(clip: dict, segs: list[dict], utts: list) -> list:
     상한·근접 접기는 없앴다. 후보가 많아 생기던 비용(우열 근거가 약할 때 thinking 폭주)은
     이 단계의 thinking 을 끄면서 사라졌다 — 근거는 graph.refine_end_bound_node 주석.
 
-    **창의 상한은 장면 끝(t_scene_baseball.end_time)이다** (2026-08-24). 구 상한은
-    현재 끝 + END_MAX_EXT_SEC(12초)라 장면 밖으로 넘어갈 수 있었다 — 발행이 정한
-    장면 경계를 하류가 넘어서지 않는다. start_candidates 와 같은 규칙이다.
+    **창은 [그 플레이의 투구, 장면 끝 + END_OUT_EXT_SEC] 이다** (2026-08-24 재조정).
+    근거는 모듈 docstring. 두 끝 다 옮겼으므로 후보는 **현재 끝보다 앞일 수도 뒤일
+    수도** 있다 — 앞이면 당기는 것이고 뒤면 미루는 것이다.
+
+    하한은 `max(투구, 컷 시작 + MIN_CLIP_SEC)` 이다. 투구는 clip["pitch_sec"]
+    (t_scene_baseball.pitch_time — 상류가 고른 그 플레이의 대표 투구)이고, 없으면
+    컷 시작을 쓴다. MIN_CLIP_SEC 을 더하는 건 투구 직후 후보를 골라 플레이가 통째로
+    사라지는 걸 막기 위해서다.
+
+    장면 끝을 넘는 후보에는 why 에 "장면 밖"을 단다. 발행이 "여기까지가 이 사건"이라고
+    정한 선을 넘는다는 사실 자체가 판단 재료다 — 숨기고 내면 모델은 그게 같은 장면
+    안인 줄 알고 고른다.
     """
-    ce = clip["cut"]["ce"]
-    hi = clip["e"]                             # 장면 끝 — 그 밖은 이 장면의 정보가 아니다
-    utt_ends = [math.ceil(ue) for _us, ue, _t in utts if ce < ue <= hi]
+    cs, ce = clip["cut"]["cs"], clip["cut"]["ce"]
+    e = clip["e"]
+    pitch = clip.get("pitch_sec")
+    lo = max(cs + MIN_CLIP_SEC, cs if pitch is None else float(pitch))
+    # 대사 꼬리(cut._snap_tail)로 ce 가 이미 장면 끝을 넘어선 클립이 있다 — 그때도
+    # 확장분은 **현재 끝 기준**으로 확보한다(장면 끝 기준이면 창이 그만큼 좁아진다).
+    hi = max(e, ce) + END_OUT_EXT_SEC
+    utt_ends = [math.ceil(ue) for _us, ue, _t in utts if lo < ue <= hi]
     shot_ends = [s["e"] for s in segs
-                 if ce < s["e"] <= hi and s.get("shot_type") not in SKIP_SHOT_TYPES]
+                 if lo < s["e"] <= hi and s.get("shot_type") not in SKIP_SHOT_TYPES]
+
+    def _why(sec: float, base: str) -> str:
+        return f"{base} · 장면 밖" if sec > e else base
 
     out: list[tuple[float, str]] = []
     for se in sorted(shot_ends):
         near = any(abs(ue - se) <= COINCIDE_SEC for ue in utt_ends)
-        out.append((float(se), "화면 전환 + 발화 끝" if near else "화면 전환"))
+        out.append((float(se), _why(se, "화면 전환 + 발화 끝" if near else "화면 전환")))
     for ue in sorted(utt_ends):
         if not any(abs(ue - se) <= COINCIDE_SEC for se in shot_ends):
-            out.append((float(ue), "발화 끝"))
+            out.append((float(ue), _why(ue, "발화 끝")))
 
     uniq: dict[int, tuple[float, str]] = {}
     for sec, why in out:                       # 같은 정수 초는 하나 (샷 우선 — 먼저 넣었다)
@@ -255,8 +293,19 @@ def end_rows(clips: list[dict], segs: list[dict], utts: list) -> list[dict]:
         cur = _ctx(ce, segs, utts, at_end=True)
         ends = sorted(_dedup(raw, drop_sig=_sig(cur)), key=lambda e: e["sec"])
         if ends:
+            # 장면 시작·투구도 후보와 **같은 모양(초 + 화면 + 해설)** 으로 싣는다
+            # (2026-08-24). 후보만 나열하면 모델은 그 플레이가 어디서 시작해 어떻게
+            # 흘러왔는지 모르는 채로 끝을 고른다 — 창의 하한이 투구로 내려가 현재보다
+            # 앞선 후보가 나오는 지금은 특히 그렇다. 앞쪽 후보를 고르는 건 결과를
+            # 버리는 일일 수도 있고 늘어진 꼬리를 자르는 일일 수도 있는데, 그 둘은
+            # 투구 이후의 서사를 봐야 갈린다. 프롬프트는 이 재료를 시간순으로 편다.
+            pitch = c.get("pitch_sec")
             rows.append({"scene_id": c["scene_id"], "tags": c["tags"],
                          "inning": c.get("inning") or "", "cs": cs, "ce": ce,
+                         "scene_s": c["s"], "scene_ctx": _ctx(c["s"], segs, utts),
+                         "pitch": None if pitch is None else float(pitch),
+                         "pitch_ctx": (None if pitch is None
+                                       else _ctx(float(pitch), segs, utts)),
                          "cur": cur, "ends": ends})
     return rows
 
