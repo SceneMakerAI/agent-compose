@@ -75,7 +75,8 @@ class ChatLLM:
         """
         Summary:
             시스템+유저 프롬프트로 1회 판정. thinking 은 호출자가 명시
-            (그래프 3콜 전부 True — .env llm_thinking=0 으로 일괄 비활성 가능).
+            (현재 select_clips 만 True — refine_end_bound·refine_start_bound 는
+            2026-08-24 에 껐다. .env llm_thinking=0 으로 전 콜 일괄 비활성 가능).
         Args:
             trace: Trace | None — 주면 프롬프트·응답·thinking 전문을 남긴다.
             name (str): 트레이스에 찍을 콜 이름 (plan·bounds·verify…).

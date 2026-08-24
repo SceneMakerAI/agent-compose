@@ -1,7 +1,12 @@
 """compose 프롬프트 — 수정이 잦은 문구는 전부 이 파일에 (bench4 compose/prompt.py 이식).
 
-LLM 은 네 곳: rephrase_query · select_clips · refine_bounds · score_match.
-출력은 JSON 금지 — 줄 단위 키: 값 형식 (Qwen 파싱 안정성 실측 관례).
+LLM 은 **세 곳**이다: rephrase_query · select_clips · refine_end_bound/refine_start_bound
+(경계 둘은 뼈대가 같아 프롬프트 한 쌍으로 본다). 출력은 JSON 금지 — 줄 단위 키: 값
+형식 (Qwen 파싱 안정성 실측 관례).
+
+VERIFY_SYSTEM·verify_user 는 **호출부가 없다** — 채점 노드(score_match)를 폐기했다
+(2026-08-20: 후보 90% 이상에 일치도 3 이 나와 변별이 없었다). 되살릴 때를 위해
+파서(plan.parse_verify)와 함께 남겨 둔 것이지 현재 그래프가 쓰는 프롬프트가 아니다.
 
 bench4 와 다른 점:
 - 어휘 문자열을 하드코딩하지 않고 flow.vocab 에서 렌더 (드리프트 해소 —
