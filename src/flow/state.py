@@ -24,7 +24,9 @@ class Inventory:
     segs: tuple[dict, ...]                    # scene-cut 샷 (s·e·shot_type)
     utts: tuple[tuple[float, float, str], ...]  # STT (s, e, text) 시간순
     game_line: str                            # "v_id=201  삼성(원정) vs 롯데(홈)"
-    pitches: tuple = ()                       # 검출 투구 전량 — refine_bounds 재료
+    # 검출 투구는 장면 행(`scenes[i]["pitches"]`)이 자기 것만 들고 있다 —
+    # 경기 전량을 인벤토리에 따로 싣던 `pitches` 필드는 폐기 (2026-08-24,
+    # bounds 모듈 docstring: 다른 타석 투구가 시작 후보로 새던 자리).
     # `trans`(전광판 전이)는 없앴다 — score_match 폐기로 읽는 코드가 사라졌고,
     # 그 사이 상류에서 t_transition_baseball 테이블 자체가 삭제됐다 (2026-08-23).
 

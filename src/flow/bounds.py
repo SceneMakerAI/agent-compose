@@ -10,16 +10,24 @@
 후보는 여기서 **결정적으로** 만들고 LLM 은 고르기만 한다 — 검증기(apply_*)가 제시 목록
 밖의 값을 기각하므로 모델이 시각을 지어낼 수 없다.
 
-**시작 후보는 cs 앞뒤로 낸다** (2026-08-20 — 구 "앞으로만" 폐기). 그 전제는 "장면 시작은
-그 플레이의 투구보다 이르거나 같다" 였는데 v203 이 반증했다: 장면5(홈런)는 장면이 657s 에
-시작하는데 그 홈런의 투구는 646~650s 다. 클립이 "담장 넘어갑니다"부터 시작해 스윙이 없다.
-장면37 도 같다(장면 8321s / 투구 8314~8318s). 전이 원장의 시각이 투구가 아니라 관측
-시점(타구·득점 판정)에 찍히면 이렇게 뒤집힌다.
+**시작 후보는 그 장면 자신의 검출 투구뿐이다** (2026-08-24 — t_scene_baseball.pitch_idxs).
+출처를 하나로 좁혔다:
+- 구 ①은 t_play_baseball 을 **경기 전량** 훑어 다른 타석의 투구까지 후보로 냈다.
+  실측 6경기 36클립 중 5건(v200 장면15·v202 장면4·36·42·v203 장면58)이 그렇게 만든
+  후보였다 — 그 장면과 무관한 투구다.
+- 구 ②③(분류된 '투구'·'타구·수비' 샷)은 뒤쪽 창에서만 냈는데, 6경기에서 프롬프트에
+  실린 적이 **0건**이다: 같은 정수 초의 보드 후보에 매번 흡수됐다(uniq).
 
-뒤쪽 후보는 분류된 '투구' 샷도 쓰지만 **앞쪽은 보드 검출 투구만** 낸다. shot_type 은
-하이라이트 구간과 겹치는 샷만 채워져 장면 이전은 대부분 NULL 이라(v203 실측: 3,238샷 중
-2,613샷 81% 가 NULL) 분류 기반 후보를 만들 수 없다. 보드 검출은 shot_type 과 독립이라
-그 구간에서 살아 있는 유일한 단서다.
+**cs 앞뒤 모두 낸다.** "장면 시작은 그 플레이의 투구보다 이르거나 같다"는 전제는 v203 이
+반증했다: 장면5(홈런)는 장면이 657s 에 시작하는데 그 홈런의 투구는 646~650s 다. 클립이
+"담장 넘어갑니다"부터 시작해 스윙이 없다. 장면37 도 같다(장면 8321s / 투구 8314~8318s).
+원장의 시각이 투구가 아니라 관측 시점(타구·득점 판정)에 찍히면 이렇게 뒤집힌다.
+
+**앞뒤 폭 제한은 없앴다.** 구 상한(뒤 15s / 앞 120s)의 근거는 "넓히면 앞 타석의 투구까지
+들어온다(타석 간격 20~40초)" 였는데, 후보가 그 장면 자신의 것뿐이면 앞 타석이 섞일
+자리가 없다. 상한을 두면 같은 타석 투구가 버려진다 — 실측 37건(v1004 장면43 은 16초
+앞이라 1초 차로 탈락해 후보 0건, 그래서 물어보지도 못했다). 남은 제약은 클립을 잘라
+먹지 않는 것(MIN_CLIP_SEC)과 현재 시작과 같은 지점 병합(MERGE_GAP_SEC)뿐이다.
 """
 
 import math
@@ -29,24 +37,8 @@ from log import get_logger
 
 log = get_logger(__name__)
 
-# 시작을 **뒤로 미룰 수 있는** 최대 폭 — 장면 경계가 앞 타석 꼬리를 무는 경우.
-# v202 장면11(역전 홈런): 장면 2558s 인데 그 홈런의 투구는 2583s, 앞 25초는 앞 타자의
-# 견제 장면이라 "무슨 일인지 알 수 없는" 시작이었다.
-#
-# 30 → 120 (2026-08-24). 30 의 근거는 "넓히면 앞 타석 투구까지 들어온다(타석 간격
-# 20~40초)"였는데, **한 행 안에 타석이 둘인 경우**엔 그 전제가 안 맞는다. 전광판이
-# 결과를 늦게 보여 주면 play 가 두 타석을 한 사건으로 묶고(전광판이 몇 건인가를
-# 정한다는 재설계 원칙의 대가), 그때 진짜 시작은 30초 밖에 있다 — v200 장면15:
-# pitch_time 2553 은 앞 타석 투구이고 홈런 스윙은 89초 뒤, 클립이 134초가 됐다.
-#
-# 넓히는 위험은 실측으로 재고 넣었다: 5경기 406장면에서 30 → 60 은 변화 0건,
-# 120 에서 **장면15 하나만** 후보가 늘었다(2건). 게이트가 이미 앵커 유형으로 좁혀
-# 놔서 앞 타석을 끌어올 자리가 거의 없다. 코퍼스가 바뀌면 다시 재야 하는 값이다.
-START_MAX_FWD_SEC = 120
-# 시작을 **앞으로 당길 수 있는** 최대 폭 — 장면 시작이 이미 플레이 도중인 경우.
-# v203 장면5 는 11초, 장면37 은 7초 앞에 그 플레이의 투구가 있다. 넓히면 앞 타석의
-# 투구까지 들어오므로(타석 간격 20~40초) 그 안쪽으로 끊는다.
-START_MAX_BACK_SEC = 15
+# 시작 후보에 붙이는 설명 — 출처가 하나뿐이라 상수다 (전광판 pitching_yn 검출).
+START_CAND_WHY = "보드 검출 투구"
 # 시작을 미뤄도 클립이 이보다 짧아지면 안 된다 — 플레이를 잘라 먹는다.
 MIN_CLIP_SEC = 8
 # 후보끼리 이보다 가까우면 **같은 지점**으로 본다.
@@ -56,8 +48,6 @@ MIN_CLIP_SEC = 8
 # 정형구라 판단에 쓸 수 없었다. 답이 없는 문제를 내면 모델은 판별자를 찾다가 사고를
 # 태운다(장면61 94,575자·804초). 정보 손실이 아니라 없는 선택지를 지우는 것이다.
 MERGE_GAP_SEC = 5.0
-# 끝을 늘릴 수 있는 최대 폭.
-END_MAX_EXT_SEC = 12
 # 후보 개수 상한 — 많으면 모델이 고르지 못하고 프롬프트만 커진다.
 CAND_MAX = 4
 # 발화 끝과 샷 경계가 이 안에 함께 오면 "둘 다"로 표시한다 (가장 깔끔한 끝점).
@@ -65,6 +55,10 @@ COINCIDE_SEC = 2.0
 # 후보로 쓰지 않는 샷 유형 — 광고 경계를 클립 끝으로 삼으면 중계가 아닌 데서 끊긴다.
 # (v201 장면5 실측: 끝 후보 넷 중 하나가 광고 경계였다.)
 SKIP_SHOT_TYPES = frozenset({"광고"})
+# 시작 후보의 화면이 비었을 때 **직후 샷**까지 당겨 보는 폭 (_ctx 근거 주석).
+# 실측 간격이 최대 0.70초라 1.0 이면 전부 덮고, 샷 중앙 길이(3~4초)보다 한참 짧아
+# 다음 장면을 끌어오지 않는다. 1.0~3.0 을 훑어도 결과가 같아 가장 좁은 값을 썼다.
+CAND_SHOT_SNAP_SEC = 1.0
 # 시작을 그대로 믿는 앵커 샷 유형 — 이 화면이면 시작 보정을 묻지 않는다.
 # '투구'는 그 자체로 맞고, '리액션'은 타석 준비 화면이라 투구 직전일 수 있다.
 # 나머지(타구·수비·주루·득점·홈인·광고·기타·미분류·앵커 없음)는 시작이 이미
@@ -107,14 +101,42 @@ def _utt_at(sec: float, utts: list, window: float = 6.0, at_end: bool = False) -
     return prev[-1] if prev else ""
 
 
+def _snap_shot(sec: float, segs: list[dict]) -> dict | None:
+    """캡션 없는 샷 꼬리에 걸린 초 → **직후 캡션 있는 샷**. 해당 없으면 None.
+
+    보드 검출 투구는 정수 초라 그 투구 샷이 시작되기 직전, 캡션 없는 샷의 마지막
+    0.x초에 걸린다 — 4경기 실측에서 화면 없는 시작 후보 11건이 이 모양이었고
+    (간격 0.50~0.70s) 정작 그 자리의 '투구'·'타구·수비' 캡션은 바로 뒤에 멀쩡히
+    있었다 (v200 장면80: 후보 12050 이 12045.93~12050.63 무캡션 샷 꼬리, 12050.63
+    부터가 "투수가 마운드에서 공을 던지고…"). 구간 화면 블록이 이걸 가려 주고 있었다.
+
+    화면(_ctx)과 **컷 좌표(start_rows 의 후보 초)에 함께** 쓴다. 보여준 화면과 실제로
+    잘리는 자리가 어긋나면, 모델은 투구 샷을 보고 골랐는데 클립은 그 0.6초 앞
+    무캡션 샷 조각부터 시작한다 — verify 의 완결성이 "첫 샷이 이전 상황 잔상"으로
+    읽는 바로 그 모양이다. cut._anchor 의 교정(미분류 부스러기 샷 → 뒤 '투구' 샷)과
+    같은 처방이다.
+    """
+    cur = _shot_at(sec, segs)
+    if cur is not None and cur.get("summary"):
+        return None
+    return next((x for x in segs
+                 if sec < x["s"] <= sec + CAND_SHOT_SNAP_SEC and x.get("summary")), None)
+
+
 def _ctx(sec: float, segs: list[dict], utts: list, at_end: bool = False) -> dict:
     """후보 1건에 붙일 서사 — 그 시각의 화면과 해설.
 
     후보·서사·해설을 따로 세 블록으로 주면 모델이 시각을 맞춰 조인해야 하고 그
     조인이 사고를 태운다 (v201 장면5: thinking 59,501자·422초). 후보 밑에 바로
     붙이면 각 줄이 자기완결적이라 비교만 하면 된다.
+
+    시작(at_end=False)은 화면이 비면 **직후 샷**까지 본다 — 근거는 _snap_shot.
+    끝(at_end=True)은 손대지 않는다 — 끝의 관심사는 "여기서 끝나는 샷"이라 뒤를
+    보면 문맥이 뒤집힌다(_shot_at docstring).
     """
     s = _shot_at(sec, segs, at_end) or (_shot_at(sec, segs) if at_end else None)
+    if not at_end:
+        s = _snap_shot(sec, segs) or s
     return {"shot_type": (s or {}).get("shot_type") or "",
             "shot": (s or {}).get("summary") or "",
             "utt": _utt_at(sec, utts, at_end=at_end)}
@@ -179,9 +201,13 @@ def end_candidates(clip: dict, segs: list[dict], utts: list) -> list:
 
     상한·근접 접기는 없앴다. 후보가 많아 생기던 비용(우열 근거가 약할 때 thinking 폭주)은
     이 단계의 thinking 을 끄면서 사라졌다 — 근거는 graph.refine_end_bound_node 주석.
+
+    **창의 상한은 장면 끝(t_scene_baseball.end_time)이다** (2026-08-24). 구 상한은
+    현재 끝 + END_MAX_EXT_SEC(12초)라 장면 밖으로 넘어갈 수 있었다 — 발행이 정한
+    장면 경계를 하류가 넘어서지 않는다. start_candidates 와 같은 규칙이다.
     """
     ce = clip["cut"]["ce"]
-    hi = ce + END_MAX_EXT_SEC
+    hi = clip["e"]                             # 장면 끝 — 그 밖은 이 장면의 정보가 아니다
     utt_ends = [math.ceil(ue) for _us, ue, _t in utts if ce < ue <= hi]
     shot_ends = [s["e"] for s in segs
                  if ce < s["e"] <= hi and s.get("shot_type") not in SKIP_SHOT_TYPES]
@@ -239,54 +265,34 @@ def end_rows(clips: list[dict], segs: list[dict], utts: list) -> list[dict]:
 # 시작 — 투구 앵커가 없는 클립만 묻는다
 # ──────────────────────────────────────────────────────
 
-def start_candidates(clip: dict, segs: list[dict], pitches: list[tuple[int, int]]) -> list:
-    """시작 후보 [(초, 설명)] — cs 앞뒤 모두. 클립이 너무 짧아지는 값은 뺀다.
+def start_candidates(clip: dict) -> list:
+    """시작 후보 [(초, 설명)] — 그 장면 자신의 검출 투구 전량 (cs 앞뒤 모두).
 
-    앞쪽(cs 이전)은 **보드 검출 투구만** 낸다: 그 구간의 shot_type 은 대부분 NULL 이라
-    분류 기반 후보를 만들 수 없고(모듈 docstring), 보드 검출은 분류와 독립이다.
-    뒤쪽(cs 이후)은 보드 검출 + 분류된 '투구' 샷, 둘 다 없으면 '타구·수비' 시작.
+    재료는 `clip["pitches"]` = t_scene_baseball.pitch_idxs 를 파싱한 (시작, 끝) 목록이다
+    (repos.fetch_scenes). 다른 출처는 쓰지 않는다 — 근거는 모듈 docstring.
+
+    **후보는 장면 구간(t_scene_baseball.start_time~end_time) 안에서만 낸다**
+    (2026-08-24). 그 밖을 후보로 내면 발행이 정한 장면 경계를 이 단계가 넘어서게 되고,
+    상류가 "여기부터 여기까지가 이 사건"이라고 정한 판단을 하류가 뒤집는 셈이 된다.
+
+    거르는 건 셋이다:
+    - 장면 구간 밖 (s 이전)
+    - 뒤로 미뤄 클립이 MIN_CLIP_SEC 밑으로 짧아지는 값 (플레이를 잘라 먹는다)
+    - 현재 시작과 MERGE_GAP_SEC 이내인 값 (같은 지점이라 대안이 아니다)
     """
     cs, ce = clip["cut"]["cs"], clip["cut"]["ce"]
-    fwd_hi = min(cs + START_MAX_FWD_SEC, ce - MIN_CLIP_SEC)
-    back_lo = cs - START_MAX_BACK_SEC
-
-    def near_fwd(sec: float) -> bool:
-        # 현재 시작과 MERGE_GAP_SEC 이내면 같은 지점이라 대안이 아니다.
-        return cs <= sec <= fwd_hi and abs(sec - cs) >= MERGE_GAP_SEC
-
-    def near_back(sec: float) -> bool:
-        return back_lo <= sec < cs and abs(sec - cs) >= MERGE_GAP_SEC
-
-    out: list[tuple[float, str]] = []
-    for ps, _pe in pitches:                        # ① 보드 검출 투구 (분류 없이도 있다)
-        if near_back(ps) or near_fwd(ps):
-            out.append((float(ps), "보드 검출 투구"))
-    for s in segs:                                 # ② 분류된 투구 샷 시작 (뒤쪽만)
-        if near_fwd(s["s"]) and s.get("shot_type") == "투구":
-            out.append((s["s"], "'투구' 샷 시작"))
-    if not out:                                    # ③ 투구를 못 찾으면 타구·수비 시작
-        for s in segs:
-            if near_fwd(s["s"]) and s.get("shot_type") == "타구·수비":
-                out.append((s["s"], "'타구·수비' 샷 시작"))
+    lo, hi = clip["s"], ce - MIN_CLIP_SEC      # hi 는 장면 끝(e) 안쪽이다 — ce <= e
     uniq: dict[int, tuple[float, str]] = {}
-    for sec, why in out:
-        uniq.setdefault(int(sec), (sec, why))
-    # 현재 시작에 가까운 것부터 — 멀수록 **다른 타석**의 투구일 위험이 크다.
+    for ps, _pe in clip.get("pitches") or ():
+        sec = float(ps)
+        if not lo <= sec <= hi or abs(sec - cs) < MERGE_GAP_SEC:
+            continue
+        uniq.setdefault(int(sec), (sec, START_CAND_WHY))
+    # 현재 시작에 가까운 것부터 — 같은 타석 안에서도 멀수록 앞선 볼카운트의 투구다.
     return sorted(uniq.values(), key=lambda x: abs(x[0] - cs))[:CAND_MAX]
 
 
-# 구간 목록 상한 — 후보~현재 사이가 길어도 프롬프트가 불어나지 않게.
-CONTEXT_MAX = 12
-
-
-def _window(items: list, lo: float, hi: float, key_s, key_e) -> list:
-    """[lo, hi] 와 겹치는 항목만 시간순 (뒤쪽 우선으로 상한 적용 — 가까울수록 중요)."""
-    hit = [x for x in items if key_e(x) > lo and key_s(x) < hi]
-    return hit[-CONTEXT_MAX:]
-
-
-def start_rows(clips: list[dict], segs: list[dict], utts: list,
-               pitches: list[tuple[int, int]]) -> list[dict]:
+def start_rows(clips: list[dict], segs: list[dict], utts: list) -> list[dict]:
     """refine_start_bound 에 낼 행 — **시작이 못 미더운 클립만**.
 
     게이트가 "앵커 유무"에서 "앵커 샷의 유형"으로 바뀌었다 (2026-08-24). 구 조건은
@@ -303,33 +309,59 @@ def start_rows(clips: list[dict], segs: list[dict], utts: list,
     화면**(투구·리액션=타석 준비)은 믿고 넘기고, 명백히 아닌 것만 묻는다:
     타구·수비·주루·득점·홈인(이미 플레이 도중) · 광고(중계가 아님) · 미분류 · 앵커 없음.
 
-    행에는 후보 초 목록과 함께 **후보~현재 구간의 대사·화면을 통째로** 싣는다
-    (2026-08-20 형식 변경). 후보마다 그 시각의 한 줄만 붙이던 방식은 후보의 화면
-    분류가 NULL 이면(v203 실측 81%) 보여줄 게 없어 후보끼리 구별되지 않았다.
-    구간을 통으로 주면 모델이 "그 사이에 무슨 일이 있었나"로 판별할 수 있다.
+    행에는 **후보와 그 시각의 화면·해설만** 싣는다 — 구간의 대사·화면을 통째로
+    주던 블록은 뺐다 (2026-08-24). 그 블록의 존재 이유는 "후보의 화면 분류가 NULL
+    이면 후보끼리 구별되지 않는다"였는데, 그 결손은 분류가 없어서가 아니라 후보 초가
+    캡션 있는 샷 시작보다 0.x초 일렀던 탓이라 _snap_shot 이 후보 줄에서 직접 푼다.
+
+    실측(4경기 325장면, 후보 재료가 t_play_baseball 전량이던 시점 → 행 18·후보 34):
+    화면 없는 후보 0 · 완전 공백 0 · 현재와 서명이 같은 후보 0 · 후보끼리 겹치는
+    서명 0. 스냅을 끄면 화면 없는 후보가 11건으로 돌아가고 그중 1건은 해설조차
+    없다 — 블록이 가려 주던 게 이 결손이다. **후보 재료가 바뀌면 이 수치는 다시
+    재야 한다**(행·후보 개수는 재료에 딸린 값이고, 변별력 0 이라는 결론만 재료와
+    독립이다).
+
+    구간 블록은 그 대가로 프롬프트를 두 배 남짓 불렸다(같은 실측에서 콜당 중앙
+    699 → 379자). 모델이 시각을 맞춰 조인해야 하는 형식이라 사고를 태우는 쪽이기도
+    했다 — _ctx docstring 의 v201 장면5(thinking 59,501자).
     """
     rows = []
     for c in clips:
         if c["cut"].get("anchor_type") in TRUSTED_ANCHOR_SHOTS:
             continue
         cs, ce = c["cut"]["cs"], c["cut"]["ce"]
-        cands = start_candidates(c, segs, pitches)
+        cands = start_candidates(c)
         if not cands:
             continue
-        lo = min(cs, min(sec for sec, _ in cands))
-        hi = max(cs, max(sec for sec, _ in cands))
+        cur = _ctx(cs, segs, utts)
+        # 후보에도 그 시각의 화면·해설을 붙인다 (2026-08-24). 구간 블록만 주면
+        # 모델이 시각을 맞춰 조인해야 하고, 후보 줄이 초 하나뿐이면 후보끼리
+        # 구별할 재료가 없다 — v200 장면15 의 정답 후보가 그랬다.
+        # 후보 초도 스냅한다 — 보여준 화면이 시작되는 자리가 곧 컷 자리다
+        # (_snap_shot). 보드 검출 정수 초를 그대로 적용하면 클립이 무캡션 샷
+        # 조각 0.6초부터 시작한다.
+        raw = [{"sec": (nx["s"] if (nx := _snap_shot(sec, segs)) else sec),
+                "why": why, **_ctx(sec, segs, utts)}
+               for sec, why in cands]          # start_candidates 순 = 현재에 가까운 순
+        # 화면·해설이 똑같은 후보는 접는다 — 끝(end_rows)과 같은 기준이다.
+        # 모델에게 보이는 것이 같으면 고를 근거가 프롬프트 안에 없고, 답 없는 문제를
+        # 내면 판별자를 찾다 사고를 태운다(_sig). 새로 필요해진 건 스냅 때문이다:
+        # 긴 '투구' 샷 하나에 검출 투구가 둘이면 둘 다 그 샷의 캡션으로 스냅돼
+        # 글자 그대로 같은 선택지가 된다 (v203 장면67: 10993·11003 실측).
+        # **가까운 쪽이 남는다** — 순서가 곧 우선순위인데 start_candidates 가 현재에
+        # 가까운 순으로 주고, "현재에서 가장 가까운 투구를 고른다"가 START_SYSTEM 의
+        # 규칙이다. 먼 쪽을 남기면 앞선 볼카운트의 투구로 시작이 끌려간다.
+        kept = sorted(_dedup(raw, drop_sig=_sig(cur)), key=lambda x: x["sec"])
+        if not kept:
+            # 끝은 후보가 없으면 그만이지만, 시작은 게이트가 이미 "이 클립의 시작은
+            # 못 미덥다"고 판정한 뒤다 — 조용히 넘기면 나쁜 시작이 안 물어본 채 남는다.
+            log.info("refine_start_bound 물을 게 없음: 장면%d 후보 %d건이 전부 현재와 같다",
+                     c["scene_id"], len(raw))
+            continue
         rows.append({
             "scene_id": c["scene_id"], "tags": c["tags"],
             "inning": c.get("inning") or "", "cs": cs, "ce": ce,
-            "cur": _ctx(cs, segs, utts),
-            # 후보에도 그 시각의 화면·해설을 붙인다 (2026-08-24). 구간 블록만 주면
-            # 모델이 시각을 맞춰 조인해야 하고, '타구·수비' 샷 시작 후보는 정작
-            # 그 샷의 캡션이 있는데도 안 실렸다 — v200 장면15 의 정답 후보가 그랬다.
-            # 보드 검출 투구 후보는 여전히 비는 경우가 많다(그 초의 분류가 NULL).
-            "cands": [{"sec": sec, "why": why, **_ctx(sec, segs, utts)}
-                      for sec, why in sorted(cands)],
-            "utts": _window(utts, lo, hi, lambda u: u[0], lambda u: u[1]),
-            "shots": _window(segs, lo, hi, lambda x: x["s"], lambda x: x["e"]),
+            "cur": cur, "cands": kept,
         })
     return rows
 

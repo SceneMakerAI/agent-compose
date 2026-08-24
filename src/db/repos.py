@@ -82,8 +82,8 @@ class SourceRepo:
             v_id (int): 대상 영상 id.
         Returns:
             list[dict]: {scene_id, s, e, tags(list), label_list(list), board_tags(list),
-                game_context, inning, score_before, score_delta, pitch_sec, obs_sec,
-                outs, bases, description}.
+                game_context, inning, score_before, score_delta, pitch_sec, pitches(tuple),
+                obs_sec, outs, bases, description}.
         Description:
             - `tags`·`label_list` 는 상류 **labels 한 칸**을 어휘로 분해한 것이다
               (vocab.split_labels — 행위 태그 / 파생 라벨). 상류가 두 축을 한 칸에
@@ -106,7 +106,7 @@ class SourceRepo:
         sql = (
             "SELECT sc.scene_id, sc.start_time, sc.end_time, sc.tags AS board_tags, "
             "       sc.labels, sc.inning, sc.score_before, sc.score_delta, "
-            "       sc.game_context, sc.pitch_time, sc.description, "
+            "       sc.game_context, sc.pitch_time, sc.pitch_idxs, sc.description, "
             "       p.board_time AS obs_time, sb.`out` AS outs, sb.base AS bases "
             "FROM t_scene_baseball sc "
             "LEFT JOIN t_play_baseball p "
@@ -134,6 +134,10 @@ class SourceRepo:
                 "inning": r["inning"], "score_before": r["score_before"],
                 "score_delta": r["score_delta"] or 0,
                 "pitch_sec": _sec(r["pitch_time"]),
+                # 그 장면 자신의 검출 투구 전량 — refine_start_bound 의 유일한 시작 후보
+                # 재료다 (bounds.start_candidates). 경기 전량을 훑던 t_play_baseball
+                # 조회는 다른 타석의 투구까지 후보로 냈다 — 6경기 36클립 중 5건.
+                "pitches": tuple(parse_pitch_idxs(r["pitch_idxs"])),
                 "obs_sec": _sec(r["obs_time"]),
                 # 전광판 미인식 센티널(-1)은 여기서 None 으로 — 그대로 새면
                 # '-1사 주자없음' 같은 값이 프롬프트에 실린다.
@@ -144,30 +148,6 @@ class SourceRepo:
         if dropped:
             log.warning("발행본 구간 결손으로 제외: v_id=%s 장면 %s", v_id, dropped)
         return out
-
-    async def fetch_pitch_windows(self, v_id: int) -> list[tuple[int, int]]:
-        """
-        Summary:
-            검출 투구 구간 **전량** — bounds 의 시작 후보 재료 (시간순).
-        Description:
-            원장(t_play_baseball.pitch_idxs)에서 읽는다. 발행본이 아니라 원장인 이유:
-            bounds 가 찾는 건 **클립 경계 부근의 투구**라 그 장면 소유분만으로는
-            모자란다. 원장에는 대표 투구를 못 골라 발행에서 빠진 사건의 후보까지
-            남아 있어 범위가 더 넓다.
-
-            투구 검출은 샷 분류와 **독립**이라 상류 분류가 비어도 살아 있는 유일한
-            단서다 — 장면 이전 구간은 분류가 NULL 인 경우가 많다.
-        Returns:
-            list[tuple[int, int]]: [(투구 시작, 끝)…] 시간순, 중복 제거.
-        """
-        sql = ("SELECT pitch_idxs FROM t_play_baseball "
-               "WHERE v_id = %s AND pitch_idxs <> '' ORDER BY p_id")
-        out: set[tuple[int, int]] = set()
-        async with self._db.acquire() as conn, conn.cursor(cursor=DictCursor) as cur:
-            await cur.execute(sql, (v_id,))
-            for r in await cur.fetchall():
-                out.update(parse_pitch_idxs(r["pitch_idxs"]))
-        return sorted(out)
 
     async def fetch_teams(self, v_id: int) -> tuple[str, str] | None:
         """

@@ -30,11 +30,13 @@ class StubStore:
         return []
 
 
-def scene(i, s, e, *, tags="안타", labels="", delta=0, inning="1회 초", pitch=None):
+def scene(i, s, e, *, tags="안타", labels="", delta=0, inning="1회 초", pitch=None,
+          pitches=()):
+    """pitches = 그 장면 자신의 검출 투구 (t_scene_baseball.pitch_idxs) — 시작 후보 재료."""
     return {"scene_id": i, "h_id": i, "s": float(s), "e": float(e),
             "scene_type": tags, "tags": tags.split(","),
             "labels": labels, "label_list": labels.split(",") if labels else [],
-            "score_delta": delta, "inning": inning,
+            "score_delta": delta, "inning": inning, "pitches": tuple(pitches),
             "score": "삼성 1-0 롯데", "score_before": "0-0", "pitch_sec": pitch}
 
 
@@ -95,16 +97,24 @@ async def test_bound_nodes_fan_out_per_clip():
     # 시작은 **투구 앵커가 없는** 클립만 묻는다. 앵커가 잡히면 cut 의 시작이 정답이라
     # 아예 묻지 않으므로 pitch_sec 과 '투구' 샷을 뺀다(앵커 있는 경우는
     # test_start_rows_skips_clips_with_pitch_anchor). 끝은 모든 클립이 묻되 후보가
-    # 있어야 하므로 클립 끝 뒤에 발화 끝을 둔다.
-    scenes = (scene(1, 100, 130), scene(2, 200, 240, tags="범타"))
-    segs = tuple(dict(s, shot_type="타구·수비", summary=f"샷{s['seg_id']}") for s in SEGS)
+    # 있어야 하므로 클립 끝 뒤 **장면 구간 안**에 발화 끝을 둔다 — 장면 밖은 후보가
+    # 아니다(bounds.end_candidates).
+    # 장면 구간은 컷보다 넉넉하게 — 끝 후보는 **장면 안**에서만 나므로(2026-08-24)
+    # 컷이 장면 끝에 붙어 있으면 물어볼 게 없다.
+    scenes = (scene(1, 100, 140, pitch=102, pitches=[(110, 111)]),
+              scene(2, 200, 250, tags="범타", pitch=202, pitches=[(210, 211)]))
+    segs = ({"seg_id": 1, "s": 100.0, "e": 106.0, "shot_type": "타구·수비", "summary": "샷1"},
+            {"seg_id": 2, "s": 106.0, "e": 120.0, "shot_type": "타구·수비", "summary": "샷2"},
+            {"seg_id": 3, "s": 120.0, "e": 126.0, "shot_type": "기타", "summary": "샷3"},
+            {"seg_id": 4, "s": 200.0, "e": 206.0, "shot_type": "타구·수비", "summary": "샷4"},
+            {"seg_id": 5, "s": 206.0, "e": 214.0, "shot_type": "타구·수비", "summary": "샷5"},
+            {"seg_id": 6, "s": 214.0, "e": 220.0, "shot_type": "기타", "summary": "샷6"})
     inv = Inventory(v_id=999, scenes=scenes, segs=segs,
                     utts=((108.0, 112.0, "던집니다"), (118.0, 124.0, "넘어갑니다"),
-                          (131.0, 136.0, "정리됩니다"),
+                          (125.0, 129.0, "정리됩니다"),
                           (208.0, 212.0, "던집니다"), (212.0, 218.0, "잡아냅니다"),
-                          (241.0, 246.0, "마무리됩니다")),
-                    game_line="g",
-                    pitches=((110, 111), (210, 211)))
+                          (232.0, 238.0, "마무리됩니다")),
+                    game_line="g")
     llm = CapturingLLM()
     g = build_graph(llm, StubEmb(), StubStore())
     await run_compose(g, inv, "안타 모음")
@@ -198,50 +208,62 @@ def test_render_inventory_survives_missing_board():
     assert "?" in render_inventory(rows)
 
 
-# ── ETC 자막 → 타자 이름 ──────────────────────────────
+def test_render_inventory_drops_snippet_duplicating_etc():
+    """기타정보와 같은 자막은 검색증거에 다시 싣지 않는다 — 자리는 다른 증거가 쓴다."""
+    from flow.plan import render_inventory
 
-def test_batter_from_etc_prefers_recent_not_frequent():
-    """직전 타석 자막이 더 많아도 **가장 최근** 이름을 고른다.
+    line = "1.최원준 .355 2-2 P.레일러 5"
+    ev = [{"scene_id": 65, "by_kind": {"etc": [line, "2.김현수 .280 0-0 P.레일러 7"]}}]
+    block = render_inventory([_inv_row(etc=line)], ev)
+    assert block.count(line) == 1                       # 기타정보 줄에만
+    assert "* [자막] 2.김현수 .280 0-0 P.레일러 7" in block
 
-    90초 창은 이전 타석까지 물 수 있다 — 최빈으로 고르면 앞 타자가 이긴다
-    (실측 v201 장면 65: 직전 자막은 김동혁인데 최빈은 전민재).
+
+# ── ETC 자막 원문 (기타정보 줄) ─────────────────────────
+
+def test_etc_takes_last_line_before_scene():
+    """장면 시작 직전의 **마지막** 자막 줄을 원문 그대로 준다.
+
+    같은 줄이 1fps 로 반복되므로 마지막 프레임 텍스트가 곧 그 런의 텍스트다.
     """
-    from flow.players import batter_of
+    from flow.subtitle import etc_at
 
-    rows = [(100, "2026 전민재 .251 / 3홈런 20타점"),
-            (105, "2026 전민재 .251 / 3홈런 20타점"),
-            (110, "2026 전민재 .251 / 3홈런 20타점"),
-            (150, "2026 김동혁 .200 ▶ 3안타 9득점"),
-            (155, "2026 김동혁 .200 ▶ 3안타 9득점")]
-    assert batter_of(rows, 160.0) == "김동혁"
-
-
-def test_batter_skips_pitcher_lines():
-    """투수 성적 줄의 주어는 타자가 아니다 — 경기 초반 선발 소개 자막 방어."""
-    from flow.players import batter_of
-
-    rows = [(10, "▶ 김진욱 6일 만의 등판(7.25 vs 두산 승)"),
-            (20, "▶ 김진욱 통산 사직 14G 5승 2패 2.59"),
-            (40, "2026 김현준 .267 / 7홈런 40타점"),
-            (45, "2026 김현준 .267 / 7홈런 40타점")]
-    assert batter_of(rows, 50.0) == "김현준"
+    rows = [(100, "1.전민재 .251 0-0 P.레일러 3"),
+            (105, "1.전민재 .251 1-0 P.레일러 4"),
+            (150, "2.김동혁 .200 2-1 P.레일러 9"),
+            (155, "2.김동혁 .200 3-1 P.레일러 10")]
+    assert etc_at(rows, 160.0) == "2.김동혁 .200 3-1 P.레일러 10"
 
 
-def test_batter_excludes_crew_and_teams():
-    """중계진·팀명은 이름이 아니다. 근거가 없으면 None (억지로 채우지 않는다)."""
-    from flow.players import batter_of
+def test_etc_respects_since_bound():
+    """직전 장면의 끝 이전 자막은 보지 않는다 — 앞 타석 줄을 물지 않게."""
+    from flow.subtitle import etc_at
 
-    rows = [(10, "캐스터 김수환 해설 민병헌"), (20, "캐스터 김수환 해설 민병헌"),
-            (30, "시즌 전적 6승 2패 NC 우세")]
-    assert batter_of(rows, 40.0) is None
+    rows = [(100, "1.전민재 .251 0-0 P.레일러 3")]
+    assert etc_at(rows, 160.0, since=120.0) is None
 
 
-def test_batter_pair_line_takes_batter():
-    """'P 투수 / 번호 타자' 형태는 뒤쪽(타자)을 고른다."""
-    from flow.players import batter_of
+def test_etc_none_when_window_empty():
+    """창에 자막이 없으면 None — 억지로 채우지 않는다."""
+    from flow.subtitle import etc_at
 
-    rows = [(10, "P 정철원 / 7 전병우 .229 2/3"), (15, "P 정철원 / 7 전병우 .229 2/3")]
-    assert batter_of(rows, 20.0) == "전병우"
+    rows = [(10, "1.전민재 .251 0-0 P.레일러 3")]
+    assert etc_at(rows, 500.0) is None
+
+
+def test_annotate_etc_fills_each_scene():
+    """장면마다 etc 키가 붙고, 하한은 직전 장면의 끝이다."""
+    from flow.subtitle import annotate_etc
+
+    scenes = [{"scene_id": 1, "s": 100.0, "e": 110.0},
+              {"scene_id": 2, "s": 200.0, "e": 210.0}]
+    rows = [(90, "1.전민재 .251 0-0 P.레일러 3"),
+            (105, "1.전민재 .251 1-0 P.레일러 4"),
+            (190, "2.김동혁 .200 2-1 P.레일러 9")]
+    annotate_etc(scenes, rows)
+    assert scenes[0]["etc"] == "1.전민재 .251 1-0 P.레일러 4"
+    # 장면 2 는 장면 1 의 끝(110) 이후만 본다 — 90·105 줄은 후보에서 빠진다.
+    assert scenes[1]["etc"] == "2.김동혁 .200 2-1 P.레일러 9"
 
 
 # ── 예산 절단 (finish) — 2026-08-24 ─────────────────────

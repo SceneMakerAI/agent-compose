@@ -12,30 +12,33 @@ SEGS = [
 UTTS = [(118.0, 127.5, "넘어갑니다"), (130.0, 134.0, "다음 타석")]
 
 
-def clip(scene_id=1, cs=115.0, ce=120.0, tags="홈런", labels="", delta=1, inning="1회 초"):
+def clip(scene_id=1, cs=115.0, ce=120.0, tags="홈런", labels="", delta=1, inning="1회 초",
+         pitches=(), s=None, e=None):
+    """cs·ce 는 컷 좌표, s·e 는 **장면 구간**(t_scene_baseball.start_time~end_time).
+
+    후보는 장면 구간 안에서만 나므로 둘을 구분해야 한다 — 기본값은 컷을 넉넉히
+    감싸는 창이라 구간 제한이 걸리지 않는다. 제한 자체를 보는 테스트만 s·e 를 준다.
+    pitches = 그 장면 자신의 검출 투구 (t_scene_baseball.pitch_idxs 파싱 결과).
+    """
     return {"scene_id": scene_id, "tags": tags.split(","),
             "label_list": labels.split(",") if labels else [],
-            "score_delta": delta, "inning": inning, "s": cs, "e": ce,
-            "pitch_sec": None, "cut": {"cs": cs, "ce": ce, "mode": "full", "shots": []}}
+            "score_delta": delta, "inning": inning,
+            "s": cs - 60 if s is None else s, "e": ce + 60 if e is None else e,
+            "pitch_sec": None, "pitches": tuple(pitches),
+            "cut": {"cs": cs, "ce": ce, "mode": "full", "shots": []}}
 
 
-def test_start_candidates_use_board_pitch_when_shot_missing():
-    """샷 분류가 없어도 보드 검출 투구가 시작 후보가 된다.
+def test_start_candidates_come_from_scene_pitch_idxs_only():
+    """시작 후보는 **그 장면 자신의 검출 투구**뿐 — 샷 분류는 보지 않는다 (2026-08-24).
 
-    장면과 겹치는 샷만 분류돼 shot_type 이 NULL 인 구간이 많다 — 보드 검출이 유일한
-    단서일 때가 있다. 역전 홈런이 '주자가 뛰는 장면'부터 시작하던 원인.
+    구 코드는 분류된 '투구'·'타구·수비' 샷도 후보로 냈는데, 6경기 실측에서 프롬프트에
+    실린 적이 0건이다(같은 정수 초의 보드 후보에 매번 흡수). 재료를 장면 자신의
+    pitch_idxs 하나로 좁혀 다른 타석 투구가 새는 통로를 막는다.
     """
-    c = clip(cs=100.0, ce=160.0)
-    got = bounds.start_candidates(c, [{"s": 100.0, "e": 130.0, "shot_type": None}],
-                                  [(126, 128)])
-    assert (126.0, "보드 검출 투구") in got
-
-
-def test_start_candidates_prefer_pitch_over_batted():
-    """투구 후보가 있으면 타구·수비는 넣지 않는다 (원칙은 투구부터)."""
-    got = bounds.start_candidates(clip(cs=100.0, ce=160.0), SEGS, [])
-    assert any("투구" in why for _sec, why in got)
-    assert not any("타구" in why for _sec, why in got)
+    c = clip(cs=100.0, ce=160.0, pitches=[(126, 128)])
+    assert bounds.start_candidates(c) == [(126.0, "보드 검출 투구")]
+    # 샷 목록에 '투구'·'타구·수비' 가 있어도 후보가 되지 않는다
+    assert bounds.start_candidates(clip(cs=100.0, ce=160.0)) == []
 
 
 def test_start_candidates_go_backward_for_board_pitch():
@@ -43,35 +46,54 @@ def test_start_candidates_go_backward_for_board_pitch():
 
     구 방침("앞으로만")은 "장면 시작은 그 플레이의 투구보다 이르거나 같다"를 전제했는데
     v203 이 반증했다: 장면5(홈런)는 장면 657s / 투구 646~650s 로, 클립이 "담장
-    넘어갑니다"부터 시작해 스윙이 없었다. 앞쪽 후보는 분류가 NULL 인 구간이라
-    **보드 검출 투구**만 쓴다.
+    넘어갑니다"부터 시작해 스윙이 없었다.
     """
-    c = clip(cs=657.0, ce=683.0)                   # v203 장면5 (홈런)
-    got = bounds.start_candidates(c, [], [(646, 650), (626, 628)])
-    secs = {int(x) for x, _ in got}
-    assert 646 in secs                             # 그 홈런의 투구 — 11초 앞
-    assert 626 not in secs                         # 31초 앞 = 앞 타석 (상한 밖)
+    c = clip(cs=657.0, ce=683.0, pitches=[(646, 650), (626, 628)])   # v203 장면5 (홈런)
+    assert {int(x) for x, _ in bounds.start_candidates(c)} == {646, 626}
 
 
-def test_start_candidates_can_move_forward():
-    """시작을 뒤로도 옮길 수 있다 — 장면 경계가 앞 타석 꼬리를 물 때가 있다.
+def test_start_candidates_bounded_by_scene_window_only():
+    """거리 상한은 없고, 경계는 **장면 구간**뿐이다 (2026-08-24).
 
-    실측(v202 장면11 역전 홈런): 장면은 2558s 에 시작하는데 그 홈런의 투구는 2583s.
-    앞 25초는 심우준 타석의 견제 장면이라 무슨 일인지 알 수 없는 시작이었다.
-    앞쪽만 보던 탓에 정답이 구조적으로 후보에 못 들어왔다.
+    구 상한(뒤 15s / 앞 120s)의 근거는 "넓히면 앞 타석 투구가 들어온다"였고, 후보가
+    그 장면 자신의 것뿐인 지금은 성립하지 않는다 — 구간 안에서는 아무리 멀어도 후보다.
+    대신 장면(start_time~end_time) 밖은 내지 않는다.
+
+    실측 주의: 발행본은 `start_time == pitch_time`(489행 중 486행 일치)이라 그 장면의
+    **앞선 투구는 대부분 장면 밖**이다 — v1004 장면43 은 pitch_idxs 가
+    `4811-4819,4827-4828` 인데 장면 시작이 4827 이라 4811 이 구간 밖으로 떨어진다.
     """
-    c = clip(cs=100.0, ce=160.0)
-    got = bounds.start_candidates(c, [{"s": 120.0, "e": 126.0, "shot_type": "투구",
-                                       "summary": "투수가 공을 던진다"}], [])
-    assert 120 in [int(sec) for sec, _ in got]
+    c = clip(cs=4827.0, ce=4900.0, s=4800.0, e=4900.0, pitches=[(4811, 4819)])
+    assert [int(x) for x, _ in bounds.start_candidates(c)] == [4811]   # 16초 앞이어도 후보
+
+    c = clip(cs=4827.0, ce=4900.0, s=4827.0, e=4900.0, pitches=[(4811, 4819)])
+    assert bounds.start_candidates(c) == []                            # 장면 밖은 안 낸다
 
 
 def test_start_candidates_keep_clip_long_enough():
     """뒤로 미뤄도 클립이 MIN_CLIP_SEC 밑으로 짧아지면 후보가 아니다."""
-    c = clip(cs=100.0, ce=120.0)                  # 20s — 116s 로 미루면 4s 만 남는다
-    got = bounds.start_candidates(c, [{"s": 116.0, "e": 118.0, "shot_type": "투구",
-                                       "summary": ""}], [])
-    assert 116 not in [int(sec) for sec, _ in got]
+    c = clip(cs=100.0, ce=120.0, pitches=[(116, 118)])   # 116s 로 미루면 4s 만 남는다
+    assert bounds.start_candidates(c) == []
+
+
+def test_start_candidates_drop_same_point_and_cap():
+    """현재 시작과 MERGE_GAP_SEC 이내면 대안이 아니고, 후보는 가까운 순 CAND_MAX 개."""
+    c = clip(cs=100.0, ce=300.0, pitches=[(98, 99), (120, 122), (140, 142),
+                                          (160, 162), (180, 182), (200, 202)])
+    got = [int(x) for x, _ in bounds.start_candidates(c)]
+    assert 98 not in got                                 # 2초 차 = 같은 지점
+    assert got == [120, 140, 160, 180][:bounds.CAND_MAX]
+
+
+def test_end_candidates_stop_at_scene_end():
+    """끝 후보는 **장면 끝(end_time)** 을 넘지 않는다 (2026-08-24).
+
+    구 상한은 현재 끝 + 12초라 발행이 정한 장면 밖으로 넘어갈 수 있었다.
+    """
+    c = clip(cs=100.0, ce=119.0, s=100.0, e=121.0)
+    got = [int(sec) for sec, _ in bounds.end_candidates(c, SEGS, UTTS)]
+    assert 120 in got                                   # 장면 안 샷 끝
+    assert 128 not in got and 132 not in got            # 장면 밖 샷 끝
 
 
 def test_end_candidates_mark_coincidence():
@@ -85,16 +107,16 @@ def test_end_candidates_mark_coincidence():
 
 def test_apply_rejects_values_outside_candidates():
     """제시하지 않은 초는 기각 — 모델이 시각을 지어낼 수 없다."""
-    c = clip(cs=115.0, ce=120.0)
-    rows = bounds.start_rows([c], SEGS, UTTS, [])
+    c = clip(cs=115.0, ce=160.0, pitches=[(100, 102)])
+    rows = bounds.start_rows([c], SEGS, UTTS)
     bounds.apply_start([c], rows, "999s")
-    assert (c["cut"]["cs"], c["cut"]["ce"]) == (115.0, 120.0)
+    assert (c["cut"]["cs"], c["cut"]["ce"]) == (115.0, 160.0)
 
 
 def test_apply_moves_when_candidate_matches():
     """시작도 **후보 번호**로 받는다 (2026-08-24 형식 통일 — 끝과 같은 규칙)."""
-    c = clip(cs=100.0, ce=160.0)
-    rows = bounds.start_rows([c], SEGS, UTTS, [])
+    c = clip(cs=100.0, ce=160.0, pitches=[(120, 122)])
+    rows = bounds.start_rows([c], SEGS, UTTS)
     want = rows[0]["cands"][0]["sec"]
     moved = bounds.apply_start([c], rows, "1")
     assert c["cut"]["cs"] == want and moved
@@ -110,15 +132,16 @@ def test_start_rows_gate_by_anchor_shot_type():
     '투구'·'리액션'(타석 준비)은 믿고, 이미 플레이 도중이거나 중계가 아닌 화면만 묻는다.
     """
     def anchored(sid, shot_type):
-        c = clip(scene_id=sid, cs=115.0, ce=160.0)
+        c = clip(scene_id=sid, cs=115.0, ce=160.0, pitches=[(104, 106)])
         c["cut"]["anchor"] = (106.0, 112.0)
         c["cut"]["anchor_type"] = shot_type
         return c
 
     clips = [anchored(1, "투구"), anchored(2, "리액션"), anchored(3, "타구·수비"),
              anchored(4, "광고"), anchored(5, None),
-             clip(scene_id=6, cs=115.0, ce=160.0)]        # anchor_type 키 없음 = 앵커 없음
-    rows = bounds.start_rows(clips, SEGS, UTTS, [(104, 106)])
+             clip(scene_id=6, cs=115.0, ce=160.0,        # anchor_type 키 없음 = 앵커 없음
+                  pitches=[(104, 106)])]
+    rows = bounds.start_rows(clips, SEGS, UTTS)
     assert [r["scene_id"] for r in rows] == [3, 4, 5, 6]
 
 
@@ -128,10 +151,10 @@ def test_apply_keeps_candidate_fraction():
     v201 은 t_segment 경계가 소수라 4369.3s('투구' 시작)와 4369s(직전 '리액션'
     끝자락)가 서로 다른 샷이다. 프롬프트는 정수로 보여주되 적용은 실측값으로 한다.
     """
-    segs = [{"s": 100.0, "e": 108.3, "shot_type": "리액션", "summary": "타석"},
+    segs = [{"s": 100.0, "e": 108.3, "shot_type": "리액션", "summary": None},
             {"s": 108.3, "e": 120.0, "shot_type": "투구", "summary": "투수가 던진다"}]
-    c = clip(cs=100.0, ce=140.0)
-    rows = bounds.start_rows([c], segs, UTTS, [])
+    c = clip(cs=120.0, ce=160.0, pitches=[(108, 109)])
+    rows = bounds.start_rows([c], segs, UTTS)
     assert rows[0]["cands"][0]["sec"] == 108.3       # 후보는 소수를 그대로 들고 있다
     bounds.apply_start([c], rows, "1")               # 번호 → 소수 초로 치환
     assert c["cut"]["cs"] == 108.3
@@ -173,10 +196,39 @@ def test_end_candidates_skip_ad_boundary():
 
 def test_start_rows_carries_current_shot():
     """현재 시작의 화면·해설이 실린다 — 모델이 "이미 투구 지점인가"를 볼 재료다."""
-    c = clip(cs=106.0, ce=120.0)
-    rows = bounds.start_rows([c], SEGS, UTTS, [(100, 101)])
+    c = clip(cs=106.0, ce=120.0, pitches=[(100, 101)])
+    rows = bounds.start_rows([c], SEGS, UTTS)
     assert rows[0]["cur"]["shot_type"] == "투구"
     assert rows[0]["cur"]["shot"] == "투수가 공을 던진다"
+
+
+def test_start_cand_snaps_to_next_captioned_shot():
+    """후보 초가 캡션 없는 샷의 마지막 0.x초에 걸리면 **직후 샷**의 화면을 붙인다.
+
+    보드 검출 투구는 정수 초라 그 투구 샷 시작(소수)보다 이르다 — 4경기 실측에서
+    화면 없는 후보 4건이 전부 이 모양이었고(간격 0.50~0.70s) 정작 그 자리의 캡션은
+    바로 뒤에 있었다. 구간 화면 블록이 가려 주던 결함이라, 블록을 빼면 드러난다.
+    """
+    segs = [{"s": 100.0, "e": 106.6, "shot_type": None, "summary": None},
+            {"s": 106.6, "e": 114.0, "shot_type": "투구", "summary": "투수가 공을 던진다"}]
+    c = clip(cs=120.0, ce=160.0, pitches=[(106, 107)])
+    rows = bounds.start_rows([c], segs, UTTS)
+    cand = rows[0]["cands"][0]
+    assert cand["shot"] == "투수가 공을 던진다"        # 화면은 0.6초 뒤 샷에서 가져온다
+    assert cand["shot_type"] == "투구"
+    # 컷 좌표도 그 샷 시작으로 — 보여준 화면과 실제 자르는 자리가 어긋나면 안 된다.
+    assert cand["sec"] == 106.6
+    assert bounds.apply_start([c], rows, "1") == ["장면1 시작 120.0→106.6"]
+
+
+def test_start_cand_shot_snap_does_not_reach_next_scene():
+    """스냅은 CAND_SHOT_SNAP_SEC 안쪽만 — 멀리 있는 샷을 끌어오지 않는다."""
+    segs = [{"s": 100.0, "e": 110.0, "shot_type": None, "summary": None},
+            {"s": 110.0, "e": 118.0, "shot_type": "투구", "summary": "투수가 공을 던진다"}]
+    c = clip(cs=118.0, ce=160.0, pitches=[(106, 107)])
+    rows = bounds.start_rows([c], segs, UTTS)
+    cand = rows[0]["cands"][0]
+    assert cand["sec"] == 106.0 and cand["shot"] == ""   # 4초 밖이라 그대로 빈다
 
 
 def test_start_user_matches_end_prompt_shape():
@@ -185,19 +237,19 @@ def test_start_user_matches_end_prompt_shape():
     두 노드가 하는 일이 "제시된 지점 중 고르기"로 같은데 형식이 달라 규칙과 파서를
     따로 들고 있었다 (2026-08-24 통일).
 
-    구간의 대사·화면 블록은 남는다: 시작 후보는 보드 검출 투구라 그 초의 화면 분류가
-    비어 있는 경우가 많아(v203 실측 81% NULL) 후보 줄만으로는 구별이 안 된다.
+    구간의 대사·화면 블록은 **없다**: 후보 줄이 자기완결적이라(각자 화면·해설을 달고
+    있다) 시각을 맞춰 조인할 재료를 따로 줄 이유가 없다 — 근거는 bounds.start_rows.
     """
     from flow.prompts import start_user
 
     utts = [(104.0, 112.0, "던집니다"), *UTTS]
-    rows = bounds.start_rows([clip(cs=100.0, ce=160.0)], SEGS, utts, [(112, 113)])
+    rows = bounds.start_rows([clip(cs=100.0, ce=160.0, pitches=[(112, 113)])], SEGS, utts)
     text = start_user(rows)
     assert text.startswith("■ 장면 1 [홈런]")
     assert "현재 00:01:40~00:02:40" in text              # hh:mm:ss 표기
     assert "  현재 시작 00:01:40" in text
     assert "  1) 시작후보 " in text
-    assert "[구간 대사]" in text and "[구간 화면]" in text
+    assert "[구간 대사]" not in text and "[구간 화면]" not in text
     assert text.rstrip().endswith("[질문] 시작을 어디로 할까?")
 
 
@@ -205,8 +257,8 @@ def test_apply_start_keeps_when_model_says_stay():
     """'유지' 면 아무것도 옮기지 않는다."""
     from flow import bounds as b
 
-    c = clip(cs=115.0, ce=160.0)
-    rows = b.start_rows([c], SEGS, UTTS, [(106, 107)])
+    c = clip(cs=115.0, ce=160.0, pitches=[(106, 107)])
+    rows = b.start_rows([c], SEGS, UTTS)
     assert b.apply_start([c], rows, "유지") == []
     assert c["cut"]["cs"] == 115.0
 

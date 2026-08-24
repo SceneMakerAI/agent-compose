@@ -203,7 +203,7 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         if not use_refine or not clips:
             return _skipped(st, "refine_start_bound", clips,
                             "보정 꺼짐" if not use_refine else "클립 없음")
-        rows = bounds_mod.start_rows(clips, list(inv.segs), inv.utts, list(inv.pitches))
+        rows = bounds_mod.start_rows(clips, list(inv.segs), inv.utts)
         log.info("refine_start_bound 대상 %d/%d클립 — 나머지는 앵커 샷이 %s 라 시작 그대로",
                  len(rows), len(clips), "·".join(sorted(bounds_mod.TRUSTED_ANCHOR_SHOTS)))
         if not rows:

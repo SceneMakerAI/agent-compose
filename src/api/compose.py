@@ -27,7 +27,7 @@ from db.status_repo import (
     COMPOSE_RENDER,
     COMPOSE_VERIFY,
 )
-from flow import plan, players
+from flow import plan, subtitle
 from flow.graph import run_compose
 from flow.state import Inventory
 from log import bind_v_id, get_logger
@@ -127,8 +127,9 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
 
     segs = [{"seg_id": i, **r} for i, r in enumerate(await repo.fetch_shots_all(req.v_id), 1)]
     utts = tuple(await repo.fetch_utterances(req.v_id))
-    # 타자 이름은 하단 자막에서 — 선수 질의를 벡터 검색이 아니라 인벤토리로 풀기 위한 재료
-    players.annotate_batters(scenes, await repo.fetch_etc_rows(req.v_id))
+    # 타석 자막(타순·타율·볼카운트·상대 투수)은 원문 그대로 — 선수 질의를 벡터 검색이
+    # 아니라 인벤토리로 풀기 위한 재료다 (이름만 뽑던 규칙은 오답 — subtitle 모듈 주석).
+    subtitle.annotate_etc(scenes, await repo.fetch_etc_rows(req.v_id))
     # 팀명은 전광판 자막이 유일한 출처다 (발행본의 score 컬럼 폐기 — repos.fetch_teams).
     # 못 읽으면 팀 없이 간다 — 관점("초=원정") 규칙은 이닝만으로도 선다.
     teams = await repo.fetch_teams(req.v_id)
@@ -137,7 +138,6 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
     inv = Inventory(
         v_id=req.v_id, scenes=tuple(scenes), segs=tuple(segs), utts=utts,
         game_line=game_line,
-        pitches=tuple(await repo.fetch_pitch_windows(req.v_id)),  # refine_bounds 후보 재료
     )
     tr = Trace(st.settings.trace_dir, req.v_id, req.query)
 

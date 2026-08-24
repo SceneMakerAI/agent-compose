@@ -341,16 +341,19 @@ def test_bound_systems_share_one_shape():
         assert "번호 중 하나" in sysmsg and "시각이나" in sysmsg
 
 
-def test_start_system_points_at_window_blocks():
-    """시작 후보엔 화면·해설이 안 붙을 수 있다 — 구간 블록을 보라고 일러 줘야 한다.
+def test_start_system_names_no_absent_block():
+    """시작 시스템 프롬프트는 **없는 블록**을 가리키지 않는다 (2026-08-24).
 
-    실측(v201 장면72): 후보 줄이 '1) 시작후보 02:54:03  보드 검출 투구' 한 줄뿐이고
-    화면·해설이 아예 없었다. 보드 검출 투구는 샷 분류와 독립이라 그 초의 분류가
-    비어 있는 일이 흔하다(v203 81% NULL).
+    647a8d1 이 고친 것과 같은 결함이다 — 프롬프트가 "아래 [구간 화면]에서 찾아라"고
+    말하는데 유저 메시지에 그 블록이 없으면 모델은 없는 재료를 찾다 사고를 태운다.
+    구간 블록을 뺐으니 그 지시도 함께 사라져야 한다(근거: bounds.start_rows).
     """
     from flow import prompts
 
-    assert "[구간 화면]" in prompts.START_SYSTEM and "[구간 대사]" in prompts.START_SYSTEM
+    assert "[구간 화면]" not in prompts.START_SYSTEM
+    assert "[구간 대사]" not in prompts.START_SYSTEM
+    # 대신 끝과 같은 안내: 후보 줄이 자기완결적이다.
+    assert "후보마다 그 시각의 화면과 해설이 함께 적혀 있다" in prompts.START_SYSTEM
 
 
 def test_plan_system_leaves_length_to_code():

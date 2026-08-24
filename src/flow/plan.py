@@ -106,12 +106,15 @@ def render_inventory(scenes: list[dict], evidence: list[dict] | None = None) -> 
             lines.append(f"- 전광판: {','.join(r['board_tags'])}")
         lines.append(f"- 점수상황: {render_score(r)}")
         lines.append(f"- 영상길이: {r['e'] - r['s']:.0f}s")
-        if r.get("batter"):
-            lines.append(f"- 기타정보: {r['batter']}")
+        if r.get("etc"):
+            lines.append(f"- 기타정보: {r['etc']}")
         if g := by_scene.get(r["scene_id"]):
-            snips = [f"  * [{KIND_LABEL.get(k, k)}] {t[:EVIDENCE_TEXT_MAX]}"
+            # 기타정보로 이미 실은 줄은 증거에서 뺀다 — 그 장면에 걸린 etc 히트가
+            # 같은 자막이면 한 블록에 같은 문장이 두 번 실리고, 종류당 2건뿐인
+            # 스니펫 자리를 중복이 먹는다.
+            snips = [f"  * [{KIND_LABEL.get(k, k)}] {t}"
                      for k, texts in sorted(g.get("by_kind", {}).items())
-                     for t in texts[:EVIDENCE_SNIPPETS_MAX]]
+                     for t in [x for x in texts if x != r.get("etc")][:EVIDENCE_SNIPPETS_MAX]]
             if snips:
                 lines.append("- 검색증거:")
                 lines += snips
@@ -120,7 +123,6 @@ def render_inventory(scenes: list[dict], evidence: list[dict] | None = None) -> 
 
 
 KIND_LABEL = {"stt": "해설", "shot": "화면", "etc": "자막"}
-EVIDENCE_TEXT_MAX = 70          # 스니펫 표기 길이 (문장 중간 절단은 감수 — 전문은 색인에)
 EVIDENCE_SNIPPETS_MAX = 2       # 장면·종류당 스니펫 수
 
 
