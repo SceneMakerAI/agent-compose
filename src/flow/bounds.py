@@ -42,9 +42,13 @@
 후보의 하한을 그 플레이의 투구로 내려 당기기를 연다. MIN_CLIP_SEC 은 여기서도
 지킨다 — 투구 직후를 고르면 스윙만 남고 결과가 사라진다.
 
-상한은 장면 끝이다. 한때 장면 끝 + 5초까지 열었다가 접었다(발행 경계를 하류가
-넘어서지 않는다 — 90287c9 의 규칙). 창의 하한이 투구로 내려간 지금은 컷 끝이 장면
-끝에 붙은 클립(6경기 133건)도 안쪽에 고를 자리가 생겨, 밖으로 나갈 이유가 없다.
+상한은 결과 전광판이다. 한때 장면 끝(+5초)까지 열었다가 접었다 — 결과 뒤는 이
+플레이가 아니다. 발행 경계 밖으로도 나가지 않는다(90287c9 의 규칙). 창의 하한이
+투구로 내려간 지금은 컷 끝이 장면 끝에 붙은 클립(6경기 133건)도 안쪽에 고를 자리가
+생겨, 밖으로 나갈 이유가 없다.
+
+전광판 자체가 다음 타석의 투구 화면에 찍힌 경우가 있다(검출 지연). 그때는 그 투구
+화면 **앞**이 상한이다 — 6경기 4건 실측, 판정 근거는 _next_pitch_cut.
 
 관측 하한(cut.obs_floor)은 후보에서 잘라 내지 않고 "결과 전광판" 마커로 보여 준다 —
 v1004 장면20 은 전광판이 결과보다 한참 뒤(00:42:26)에 찍혀, 잘라 냈으면 손댈 방법이
@@ -218,6 +222,53 @@ def _result_end(obs: float | None, scene_e: float) -> float:
     return scene_e if obs is None else obs
 
 
+def _next_pitches(clip: dict, scenes: list[dict]) -> list[float]:
+    """**다음 장면들**의 검출 투구 중 이 장면 구간 안에 든 것 (시간순).
+
+    재료는 뒤 장면 행의 pitch_sec·pitch_idxs 다. 발행 경계는 겹칠 수 있어서
+    (다음 장면의 시작이 이 장면 끝보다 이르다) 다음 타석의 투구가 이 장면 안에
+    찍히는 일이 있다 — 6경기 477장면 중 8건 실측.
+    """
+    out = []
+    for sc in scenes:
+        if sc["scene_id"] <= clip["scene_id"]:
+            continue
+        for p in [sc.get("pitch_sec"), *(float(x) for x, _ in sc.get("pitches") or ())]:
+            if p is not None and clip["s"] < p < clip["e"]:
+                out.append(float(p))
+    return sorted(out)
+
+
+def _next_pitch_cut(clip: dict, segs: list[dict], scenes: list[dict]) -> tuple[float, float] | None:
+    """결과 전광판이 **다음 타석의 투구 화면**에 찍혔으면 (그 화면 시작, 투구 시각).
+
+    전광판(obs_sec)은 결과가 난 시점이지만 검출이 늦어, 그 초가 이미 다음 타석이
+    시작된 뒤에 걸리는 일이 있다. 그러면 cut 의 관측 하한(obs 가 든 샷의 끝)이 다음
+    투구를 통째로 물고, 끝 후보 창의 상한도 거기까지 열린다 — 이 플레이가 아니다.
+
+    판정은 두 조건을 **함께** 본다 (한쪽만으로는 샌다, 6경기 477장면 실측):
+    - obs 가 든 샷의 유형이 '투구' — 이것만 보면 77건이 걸리는데 대부분 **이 플레이
+      자신의** 투구 샷이다(삼진은 전광판이 그 투구 화면 안에 뜬다). 앞으로 당기면
+      클립이 통째로 사라진다.
+    - 그 샷의 머리(±PITCH_SNAP_SEC)에 다음 장면의 검출 투구가 있다 — 이것만 보면
+      결과 샷(타구·수비)의 머리에 걸린 검출까지 걸린다(v202 장면27: 더블플레이
+      화면이 통째로 날아간다).
+
+    둘 다 만족하는 건 4건이고(v202 장면31·v203 장면10·v1003 장면66·v1004 장면9)
+    전부 그 샷의 캡션이 "투수가 공을 던지고…"인 다음 타석이다. 샷 유형이 비어
+    있으면(분류 25%) 당기지 않는다 — 근거 없이 좁히는 쪽보다 그대로가 안전하다.
+    """
+    obs = clip.get("obs_sec")
+    if obs is None:
+        return None
+    sh = next((x for x in segs if x["s"] <= obs < x["e"]), None)
+    if sh is None or (sh.get("shot_type") or "") != "투구":
+        return None
+    p = next((p for p in _next_pitches(clip, scenes)
+              if abs(p - sh["s"]) <= PITCH_SNAP_SEC), None)
+    return None if p is None else (sh["s"], p)
+
+
 def _pitch_idx(span: list[dict], pitch: float | None) -> int | None:
     """투구 화면인 세그먼트의 인덱스 — 경계 부스러기면 다음으로 스냅.
 
@@ -236,7 +287,8 @@ def _pitch_idx(span: list[dict], pitch: float | None) -> int | None:
 
 
 def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: float,
-               obs: float | None, ce: float) -> tuple[list[dict], list[dict]]:
+               obs: float | None, ce: float,
+               npitch: float | None = None) -> tuple[list[dict], list[dict]]:
     """세그먼트 골격 → (줄 목록, 후보 목록). 번호는 줄과 후보가 같은 순서로 공유한다.
 
     접는 기준은 "모델에게 보여 줄 게 없는 줄"이다 — 화면 설명도 해설도 마커도 없고
@@ -263,6 +315,11 @@ def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: f
             marks.append("투구")
         if obs is not None and x["s"] < obs <= x["e"]:
             marks.append("결과 전광판")
+        # 다음 타석의 투구 화면 — 여기부터는 이 플레이가 아니다 (_next_pitch_cut).
+        # 전광판이 이 화면에 찍힌 경우라 위 마커와 같은 줄에 붙는다: 왜 번호가
+        # 여기서 끊기는지가 그 줄 하나로 읽힌다.
+        if npitch is not None and x["s"] <= npitch < x["e"]:
+            marks.append("다음 타석 투구")
         is_cur = abs(x["s"] - ce) < 1
         if not (x["shot"] or said or marks or is_cur):
             fold.append(x)
@@ -291,7 +348,8 @@ def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: f
     return lines, ends
 
 
-def end_rows(clips: list[dict], segs: list[dict], utts: list) -> list[dict]:
+def end_rows(clips: list[dict], segs: list[dict], utts: list,
+             scenes: list[dict] | None = None) -> list[dict]:
     """refine_end_bound 에 낼 행 — **장면 전체를 세그먼트 한 줄기로** 편다.
 
     **모든 클립이 대상**이다(앵커 유무 무관). 끝은 코드가 답할 수 없는 질문이라
@@ -319,9 +377,13 @@ def end_rows(clips: list[dict], segs: list[dict], utts: list) -> list[dict]:
              맨 뒤에 따로 낸다.
 
     마커(marks): 장면 시작 · 투구 · 결과 전광판(cut.obs_floor — 전이 원장이 보증하는
-    결과 관측). 관측 하한을 후보에서 잘라 내는 대신 마커로 보여 주고 판단을 맡긴다 —
-    v1004 장면20 은 전광판이 결과보다 한참 뒤(00:42:26)에 찍혀, 잘라 냈으면 이 장면은
-    손댈 방법이 없었다.
+    결과 관측) · 다음 타석 투구. 관측 하한을 후보에서 잘라 내는 대신 마커로 보여 주고
+    판단을 맡긴다 — v1004 장면20 은 전광판이 결과보다 한참 뒤(00:42:26)에 찍혀, 잘라
+    냈으면 이 장면은 손댈 방법이 없었다.
+
+    후보 창의 상한은 결과 전광판이되, 그 전광판이 **다음 타석의 투구 화면**에 찍혔으면
+    그 화면 앞까지다 (_next_pitch_cut). 전광판 줄에는 두 마커가 함께 붙어, 번호가 왜
+    거기서 끊기는지가 한 줄로 읽힌다.
     """
     rows = []
     for c in clips:
@@ -335,8 +397,16 @@ def end_rows(clips: list[dict], segs: list[dict], utts: list) -> list[dict]:
         lo = max(cs + MIN_CLIP_SEC, span[pi]["s"] if pi is not None else cs)
         obs = cut.obs_floor(c, segs)
         hi = _result_end(obs, c["e"])
+        # 전광판이 다음 타석의 투구 화면에 찍혔으면 그 **앞에서** 끊는다.
+        # 전광판은 결과가 난 시점인데 검출이 늦어 다음 투구와 같은 화면에 걸린 것이라,
+        # 그 화면까지 열어 두면 클립이 다음 타석의 투구를 물고 끝난다.
+        pull = _next_pitch_cut(c, segs, scenes or [])
+        npitch = None
+        if pull is not None:
+            npitch, hi = pull[0], min(hi, pull[0])
 
-        lines, ends = _end_lines(span, utts, pi=pi, lo=lo, hi=hi, obs=obs, ce=ce)
+        lines, ends = _end_lines(span, utts, pi=pi, lo=lo, hi=hi, obs=obs, ce=ce,
+                                 npitch=npitch)
 
         if not ends:
             continue
