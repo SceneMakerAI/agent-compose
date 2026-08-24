@@ -1,8 +1,6 @@
 """bounds 후보 생성·처분 — 순수 계산이라 스텁 없이 검증."""
 
-import re
-
-from flow import bounds, prompts
+from flow import bounds
 
 SEGS = [
     {"s": 100.0, "e": 106.0, "shot_type": "리액션", "summary": "타자가 타석에 들어선다"},
@@ -87,61 +85,6 @@ def test_start_candidates_drop_same_point_and_cap():
     assert got == [120, 140, 160, 180][:bounds.CAND_MAX]
 
 
-def test_end_candidates_reach_past_scene_end_by_ext():
-    """끝 후보는 **장면 끝 + END_OUT_EXT_SEC** 까지 낸다 (2026-08-24 재조정).
-
-    상한이 장면 끝이던 동안 6경기 477클립 중 133건이 창이 비어 이 노드가 침묵했다
-    (그중 127건은 장면 끝 밖에 후보가 있었다). 컷 끝이 장면 끝에 붙는 건 정상 경로다 —
-    FULL_CLIP_TAGS 는 끝을 장면 그대로 쓴다.
-    """
-    c = clip(cs=100.0, ce=119.0, s=100.0, e=121.0)      # 장면 끝 121 → 상한 126
-    got = [int(sec) for sec, _ in bounds.end_candidates(c, SEGS, UTTS)]
-    assert 120 in got                                   # 장면 안 샷 끝
-    assert 128 not in got and 132 not in got            # 상한 밖
-
-
-def test_end_candidates_mark_outside_scene():
-    """장면 끝을 넘는 후보는 '장면 밖'으로 표시한다 — 발행 경계를 넘는다는 게 판단 재료다."""
-    c = clip(cs=100.0, ce=115.0, s=100.0, e=119.0)      # 장면 끝 119 → 상한 124
-    got = {int(sec): why for sec, why in bounds.end_candidates(c, SEGS, UTTS)}
-    assert "장면 밖" not in got[112]                     # 장면 안
-    assert "장면 밖" in got[120]                         # 장면 끝(119) 뒤
-
-
-def test_end_candidates_start_at_pitch_not_current_end():
-    """창의 하한은 **그 플레이의 투구**다 — 현재 끝보다 앞선 후보도 낸다 (2026-08-24).
-
-    하한이 '현재 끝'이던 동안 이 노드는 늘리기 전용이었다. 리플레이·다음 타석 준비까지
-    물고 늘어진 컷을 되돌릴 방법이 없었다.
-    """
-    c = clip(cs=100.0, ce=127.0, s=100.0, e=128.0)
-    c["pitch_sec"] = 106.0
-    got = [int(sec) for sec, _ in bounds.end_candidates(c, SEGS, UTTS)]
-    assert 112 in got and 120 in got                    # 현재 끝(127)보다 앞
-    assert 106 not in got                               # 투구 자신은 후보가 아니다
-
-
-def test_end_candidates_keep_min_clip_from_cut_start():
-    """투구가 컷 시작에 붙어 있어도 MIN_CLIP_SEC 안쪽은 후보가 아니다.
-
-    투구 직후 후보를 고르면 스윙만 남고 결과가 통째로 사라진다.
-    """
-    c = clip(cs=106.0, ce=127.0, s=100.0, e=128.0)
-    c["pitch_sec"] = 106.0
-    got = [int(sec) for sec, _ in bounds.end_candidates(c, SEGS, UTTS)]
-    assert 112 not in got                               # 106+8=114 밑
-    assert 120 in got
-
-
-def test_end_candidates_mark_coincidence():
-    """샷 끝에 발화 끝이 겹치면 표시한다 — 가장 깔끔한 끝점을 모델이 알게.
-
-    컷 좌표는 샷 경계이고 발화 끝은 그 자리를 고를 **근거**다 (2026-08-24 재설계).
-    """
-    got = bounds.end_candidates(clip(ce=120.0), SEGS, UTTS)
-    assert any("화면 전환 + 발화 끝" in why for _sec, why in got)
-
-
 def test_apply_rejects_values_outside_candidates():
     """제시하지 않은 초는 기각 — 모델이 시각을 지어낼 수 없다."""
     c = clip(cs=115.0, ce=160.0, pitches=[(100, 102)])
@@ -195,40 +138,6 @@ def test_apply_keeps_candidate_fraction():
     assert rows[0]["cands"][0]["sec"] == 108.3       # 후보는 소수를 그대로 들고 있다
     bounds.apply_start([c], rows, "1")               # 번호 → 소수 초로 치환
     assert c["cut"]["cs"] == 108.3
-
-
-def test_end_candidates_give_every_shot_end_no_cap():
-    """창 안의 샷 끝은 **전부** 낸다 — 개수 상한도 근접 접기도 없다 (2026-08-24).
-
-    구 설계는 종류 우선으로 CAND_MAX(4)까지 자르고 5초 이내를 접어 클립당 최종 후보가
-    평균 1.4개로 줄었다 (comp37 실측: 후보 1개인 클립이 8/10 — 이지선다). 상한이
-    있던 이유(후보 우열이 약하면 thinking 폭주)는 이 단계의 thinking 을 끄면서 사라졌다.
-    """
-    segs = [{"s": 120.0 + i, "e": 121.0 + i, "shot_type": "리액션", "summary": f"샷{i}"}
-            for i in range(6)]                       # 끝 121·122·123·124·125·126
-    utts = [(118.0, 130.0, "결국에 이겨내네요")]      # 발화 끝 130 — 샷과 안 겹친다
-    got = bounds.end_candidates(clip(cs=100.0, ce=120.0, e=200.0), segs, utts)
-    assert [int(sec) for sec, _ in got] == [121, 122, 123, 124, 125, 126, 130]
-    assert len(got) > bounds.CAND_MAX                # 상한에 안 걸린다
-
-
-def test_end_candidates_keep_speech_end_when_no_shot_boundary():
-    """창 안에 샷 경계가 없으면 발화 끝이 후보다 — 커버리지를 잃지 않는다.
-
-    실측(comp38 장면48): 12초 창 안 샷 끝이 0개였다. 샷만 내면 이 클립은 후보가 없어
-    끝 보정을 통째로 건너뛴다.
-    """
-    got = bounds.end_candidates(clip(ce=120.0), [], [(118.0, 128.0, "이겨내네요")])
-    assert [(int(x), w) for x, w in got] == [(128, "발화 끝")]
-
-
-def test_end_candidates_skip_ad_boundary():
-    """광고 경계는 끝 후보가 아니다 — 중계가 아닌 데서 끊긴다."""
-    segs = [{"s": 120.0, "e": 122.0, "shot_type": "광고", "summary": None},
-            {"s": 122.0, "e": 124.0, "shot_type": "리액션", "summary": ""}]
-    got = bounds.end_candidates(clip(ce=119.0), segs, [])
-    assert 122 not in [int(sec) for sec, _ in got]
-    assert 124 in [int(sec) for sec, _ in got]
 
 
 def test_start_rows_carries_current_shot():
@@ -300,21 +209,6 @@ def test_apply_start_keeps_when_model_says_stay():
     assert c["cut"]["cs"] == 115.0
 
 
-def test_apply_end_maps_index_to_exact_candidate_second():
-    """끝 응답은 **후보 번호**이고, 적용은 그 후보의 소수 초로 한다 (2026-08-24).
-
-    초를 받아쓰게 하면 소수가 사라진다 — v201 은 t_segment 경계가 소수라 4369.3s
-    ('투구' 시작)와 4369s(직전 '리액션' 끝자락)가 서로 다른 샷이다. 구 형식
-    (`장면 1: 끝 128초`)은 폐기했다.
-    """
-    for text in ("1", "1번", "번호 1"):
-        c = clip(cs=115.0, ce=120.0)
-        rows = bounds.end_rows([c], SEGS, UTTS)
-        want = rows[0]["ends"][0]["sec"]
-        bounds.apply_end([c], rows, text)
-        assert c["cut"]["ce"] == want, text
-
-
 # ── 중복 후보 병합 ─────────────────────────────────────
 
 # 90~130 은 현재 시작이 놓일 자리(다른 샷·다른 발화), 130~200 은 한 투구 샷 + 한 발화
@@ -322,70 +216,6 @@ def test_apply_end_maps_index_to_exact_candidate_second():
 _SEGS2 = [{"s": 90.0, "e": 130.0, "shot_type": "리액션", "summary": "타자가 걸어간다"},
           {"s": 130.0, "e": 200.0, "shot_type": "투구", "summary": "투수가 공을 던진다"}]
 _UTTS2 = [(90.0, 130.0, "다른 문장이다"), (130.0, 200.0, "같은 문장이 계속된다")]
-
-
-def test_end_rows_carry_scene_start_and_pitch_with_context():
-    """행에 장면 시작·투구가 **화면·해설과 함께** 실린다 — 서사의 출발점 (2026-08-24).
-
-    후보가 현재 끝 앞뒤로 다 나오므로, 앞쪽 후보가 결과를 버리는 자리인지 늘어진
-    꼬리를 자르는 자리인지 갈리려면 그 플레이가 어떻게 시작했는지가 있어야 한다.
-    """
-    c = clip(cs=106.0, ce=120.0, s=100.0, e=128.0)
-    c["pitch_sec"] = 106.0
-    row = bounds.end_rows([c], SEGS, UTTS)[0]
-    assert (row["scene_s"], row["pitch"]) == (100.0, 106.0)
-    assert row["scene_ctx"]["shot_type"] == "리액션"      # 100~106 샷
-    assert row["pitch_ctx"]["shot_type"] == "투구"        # 106~112 샷
-    text = prompts.end_user([row])
-    assert "  장면 시작 00:01:40" in text
-    assert "  투구 00:01:46" in text
-    assert "     화면 [투구] 투수가 공을 던진다" in text
-
-
-def test_end_user_orders_current_among_candidates():
-    """'현재 끝'은 후보들 사이 **시간순 제자리**에 놓인다 — 당김/미룸이 순서로 보인다."""
-    c = clip(cs=100.0, ce=127.0, s=100.0, e=128.0)
-    c["pitch_sec"] = 106.0
-    row = bounds.end_rows([c], SEGS, UTTS)[0]
-    text = prompts.end_user([row])
-    order = [ln for ln in text.splitlines() if "끝후보" in ln or "현재 끝" in ln]
-    secs = [re.search(r"\d\d:\d\d:\d\d", ln).group() for ln in order]
-    assert secs == sorted(secs)                          # 줄이 시간순이다
-    assert any("현재 끝" in ln for ln in order[1:])       # 맨 위가 아니라 사이에 있다
-
-
-def test_end_rows_drop_speech_candidate_identical_to_current():
-    """현재와 화면·해설이 똑같은 **발화 끝** 후보는 뺀다 — 정말 아무것도 아니다.
-
-    샷이 창(+12s) 밖까지 이어져 샷 경계 후보가 없는 상황. 남는 건 발화 끝뿐인데
-    그마저 현재와 같으면 물어볼 게 없어 행 자체가 나오지 않는다.
-    """
-    segs = [{"s": 120.0, "e": 200.0, "shot_type": "리액션", "summary": "같은 화면"}]
-    utts = [(120.0, 136.0, "같은 해설")]
-    assert bounds.end_rows([clip(cs=100.0, ce=130.0)], segs, utts) == []
-
-
-def test_end_rows_drop_shot_boundary_identical_to_current():
-    """샷 경계 후보도 설명이 현재와 똑같으면 뺀다 — 종류를 안 가린다 (2026-08-24).
-
-    현재 끝(130s)이 샷 한복판이라 그 샷의 끝(133s)은 같은 샷이라서 화면·해설이 같다.
-    한때는 "샷을 끝까지 보고 자른다"가 다른 선택이라 남겼는데, 실측이 그 걱정을
-    지웠다: 4회 실행 78콜에서 그런 후보는 4건뿐이고 전부 다른 후보와 함께 나왔다.
-    남겨 봐야 고를 근거가 프롬프트 안에 없는 선택지만 하나 느는 것이다.
-    """
-    segs = [{"s": 120.0, "e": 133.0, "shot_type": "리액션", "summary": "같은 화면"},
-            {"s": 133.0, "e": 136.0, "shot_type": "타구·수비", "summary": "다른 화면"}]
-    utts = [(120.0, 133.5, "같은 해설"), (133.5, 136.0, "다른 해설")]
-    ends = bounds.end_rows([clip(cs=100.0, ce=130.0)], segs, utts)[0]["ends"]
-    assert [int(e["sec"]) for e in ends] == [136]        # 133 은 현재와 구별 안 돼 빠짐
-
-
-def test_end_rows_skip_clip_when_nothing_left_to_ask():
-    """후보가 전부 빠지면 그 클립은 행에서 빠진다 — 물어볼 게 없으면 안 묻는다."""
-    segs = [{"s": 120.0, "e": 133.0, "shot_type": "리액션", "summary": "같은 화면"},
-            {"s": 133.0, "e": 136.0, "shot_type": "리액션", "summary": "같은 화면"}]
-    utts = [(120.0, 136.0, "같은 해설")]
-    assert bounds.end_rows([clip(cs=100.0, ce=130.0)], segs, utts) == []
 
 
 # ── 처분 파서 — 응답 형식 (끝=번호 / 시작=초) ───────────
@@ -435,3 +265,105 @@ def test_apply_start_takes_candidate_index_like_end():
         clips = [_clip()]
         assert bounds.apply_start(clips, [ROW], text) == []
         assert clips[0]["cut"]["cs"] == 6696.0
+
+
+# ── 끝 — 세그먼트 골격 (2026-08-24 재설계) ──────────────
+# 장면 100~140. 투구는 106, 결과 관측은 118(타구·수비 샷 안), 컷은 106~112.
+_SEGS_E = [
+    {"s": 100.0, "e": 106.0, "shot_type": "리액션", "summary": "타자가 타석에 들어선다"},
+    {"s": 106.0, "e": 112.0, "shot_type": "투구", "summary": "투수가 공을 던진다"},
+    {"s": 112.0, "e": 120.0, "shot_type": "타구·수비", "summary": "외야수가 타구를 쫓는다"},
+    {"s": 120.0, "e": 124.0, "shot_type": None, "summary": None},
+    {"s": 124.0, "e": 128.0, "shot_type": None, "summary": None},
+    {"s": 128.0, "e": 136.0, "shot_type": "리액션", "summary": "더그아웃이 환호한다"},
+    {"s": 136.0, "e": 140.0, "shot_type": "광고", "summary": None},
+]
+_UTTS_E = [(112.0, 119.0, "넘어갑니다"), (128.0, 134.0, "홈런입니다")]
+
+
+def _end_clip(ce=112.0):
+    c = clip(cs=106.0, ce=ce, s=100.0, e=140.0)
+    c["pitch_sec"] = 106.0
+    c["obs_sec"] = 118.0
+    return c
+
+
+def test_end_rows_lay_out_whole_scene_in_time_order():
+    """장면 시작부터 끝까지 세그먼트가 시간순으로 다 실린다 — 후보 목록이 아니라 서사다.
+
+    구 형식은 '현재 끝 이후의 샷 끝'만 뽑아 나열해, 이 플레이가 어떻게 시작해 어디서
+    결과가 났는지가 프롬프트에 없었다.
+    """
+    row = bounds.end_rows([_end_clip()], _SEGS_E, _UTTS_E)[0]
+    ats = [ln["at"] for ln in row["lines"]]
+    assert ats == sorted(ats)
+    assert row["lines"][0]["marks"] == ["장면 시작"]
+    assert "투구" in row["lines"][1]["marks"]           # 106~112 = 투구 샷
+    assert "결과 전광판" in row["lines"][2]["marks"]     # obs 118 이 든 샷
+    assert row["scene_s"] == 100.0 and row["scene_e"] == 140.0
+
+
+def test_end_candidate_number_maps_to_segment_end():
+    """번호는 세그먼트 **끝**으로 치환된다 — 고른 화면까지 클립에 들어간다."""
+    c = _end_clip()
+    rows = bounds.end_rows([c], _SEGS_E, _UTTS_E)
+    first = rows[0]["ends"][0]
+    assert (first["at"], first["sec"]) == (120.0, 124.0)   # 줄은 시작, 적용은 끝
+    bounds.apply_end([c], rows, "1")
+    assert c["cut"]["ce"] == 124.0
+
+
+def test_end_rows_number_only_after_pitch_and_min_clip():
+    """번호는 투구 이후 · MIN_CLIP_SEC 밖의 자리에만 붙는다.
+
+    투구 직후를 고르면 스윙만 남고 결과가 통째로 사라진다.
+    """
+    row = bounds.end_rows([_end_clip()], _SEGS_E, _UTTS_E)[0]
+    numbered = [ln["at"] for ln in row["lines"] if ln.get("num")]
+    assert min(numbered) >= 106.0 + bounds.MIN_CLIP_SEC
+    assert 112.0 not in numbered                       # 현재 자리라 후보가 아니다
+
+
+def test_end_rows_skip_ad_segment():
+    """광고 세그먼트는 고를 수 없다 — 중계가 아닌 데서 끊긴다."""
+    row = bounds.end_rows([_end_clip()], _SEGS_E, _UTTS_E)[0]
+    assert all(ln.get("shot_type") != "광고" for ln in row["lines"] if ln.get("num"))
+
+
+def test_end_rows_fold_blank_segments():
+    """화면 설명도 해설도 마커도 없는 연속 구간은 한 줄로 접는다.
+
+    샷 캡션이 25%만 채워져 있어(v201 4,013샷 중 1,000) 접지 않으면 '(설명 없음)'
+    줄이 대부분이 된다 — 고를 근거가 프롬프트 안에 없는 선택지다.
+    """
+    row = bounds.end_rows([_end_clip()], _SEGS_E, _UTTS_E)[0]
+    folds = [ln for ln in row["lines"] if ln["kind"] == "fold"]
+    assert [(f["at"], f["n"]) for f in folds] == [(120.0, 2)]   # 120~124·124~128
+
+
+def test_end_rows_current_line_carries_shot_and_speech():
+    """컷 끝이 세그먼트 시작과 안 맞으면 그 자리의 화면·해설을 붙여 따로 낸다.
+
+    장면 끝까지 쓰는 클립이 흔한데(FULL_CLIP_TAGS·관측 하한), 그때 '현재'가 시각
+    한 줄로만 나오면 지금 무엇을 보고 끊는지가 프롬프트에서 사라진다.
+    """
+    row = bounds.end_rows([_end_clip(ce=140.0)], _SEGS_E, _UTTS_E)[0]
+    cur = next(ln for ln in row["lines"] if ln["kind"] == "cur")
+    assert cur["at"] == 140.0 and cur["note"] == "장면 끝"
+    assert cur["shot_type"] == "광고" or cur["shot"] or cur["utts"]
+
+
+def test_end_user_renders_skeleton():
+    """프롬프트 = 머리 + [진행] + 시간순 줄 + [질문]. 화면·해설은 전문 그대로."""
+    from flow.prompts import end_user
+
+    rows = bounds.end_rows([_end_clip()], _SEGS_E, _UTTS_E)
+    text = end_user(rows)
+    assert text.startswith("■ 장면 1 [홈런] 1회 초")
+    assert "[진행] 장면 00:01:40~00:02:20 (40s)" in text
+    assert "      장면 시작 00:01:40 [리액션] 타자가 타석에 들어선다" in text
+    assert "  현재) " in text
+    assert "(설명·해설 없는 구간 2컷)" in text
+    assert '해설 "외야수가 타구를 쫓는다"' not in text          # 화면은 화면 줄에만
+    assert '해설 "넘어갑니다"' in text                          # 잘리지 않은 전문
+    assert text.rstrip().endswith("[질문] 끝을 어디로 할까?")
