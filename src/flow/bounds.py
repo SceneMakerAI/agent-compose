@@ -47,8 +47,8 @@
 투구로 내려간 지금은 컷 끝이 장면 끝에 붙은 클립(6경기 133건)도 안쪽에 고를 자리가
 생겨, 밖으로 나갈 이유가 없다.
 
-전광판 자체가 다음 타석의 투구 화면에 찍힌 경우가 있다(검출 지연). 그때는 그 투구
-화면 **앞**이 상한이다 — 6경기 4건 실측, 판정 근거는 _next_pitch_cut.
+전광판 초 자체가 다음 타석의 검출 투구 구간 안인 경우가 있다(검출 지연). 그때는 그
+투구 **앞**이 상한이다 — 6경기 9건 실측, 판정 근거는 _next_pitch_cut.
 
 관측 하한(cut.obs_floor)은 후보에서 잘라 내지 않고 "결과 전광판" 마커로 보여 준다 —
 v1004 장면20 은 전광판이 결과보다 한참 뒤(00:42:26)에 찍혀, 잘라 냈으면 손댈 방법이
@@ -75,6 +75,10 @@ MIN_CLIP_SEC = 8
 MERGE_GAP_SEC = 5.0
 # 후보 개수 상한 — 많으면 모델이 고르지 못하고 프롬프트만 커진다.
 CAND_MAX = 4
+# 끝 후보끼리(또는 현재 끝과) 이보다 가까우면 **같은 지점**이라 번호를 안 붙인다.
+# 화면 줄과 해설 줄을 합치면서 필요해졌다 — 샷 경계와 발화 끝이 0.x초 차로 붙는 일이
+# 흔한데, 1초 미만의 차이는 클립에서 구별되지 않는다. 줄 자체는 남는다(서사).
+END_MERGE_SEC = 1.0
 # 장면 경계에 걸친 세그먼트가 클램프 후 이보다 짧으면 줄로 내지 않는다.
 # 0.x초짜리 조각은 화면이라 부를 게 없고, 마커만 그리로 끌려가 엉뚱한 줄에 붙는다.
 SEG_MIN_SEC = 1.0
@@ -222,53 +226,6 @@ def _result_end(obs: float | None, scene_e: float) -> float:
     return scene_e if obs is None else obs
 
 
-def _next_pitches(clip: dict, scenes: list[dict]) -> list[float]:
-    """**다음 장면들**의 검출 투구 중 이 장면 구간 안에 든 것 (시간순).
-
-    재료는 뒤 장면 행의 pitch_sec·pitch_idxs 다. 발행 경계는 겹칠 수 있어서
-    (다음 장면의 시작이 이 장면 끝보다 이르다) 다음 타석의 투구가 이 장면 안에
-    찍히는 일이 있다 — 6경기 477장면 중 8건 실측.
-    """
-    out = []
-    for sc in scenes:
-        if sc["scene_id"] <= clip["scene_id"]:
-            continue
-        for p in [sc.get("pitch_sec"), *(float(x) for x, _ in sc.get("pitches") or ())]:
-            if p is not None and clip["s"] < p < clip["e"]:
-                out.append(float(p))
-    return sorted(out)
-
-
-def _next_pitch_cut(clip: dict, segs: list[dict], scenes: list[dict]) -> tuple[float, float] | None:
-    """결과 전광판이 **다음 타석의 투구 화면**에 찍혔으면 (그 화면 시작, 투구 시각).
-
-    전광판(obs_sec)은 결과가 난 시점이지만 검출이 늦어, 그 초가 이미 다음 타석이
-    시작된 뒤에 걸리는 일이 있다. 그러면 cut 의 관측 하한(obs 가 든 샷의 끝)이 다음
-    투구를 통째로 물고, 끝 후보 창의 상한도 거기까지 열린다 — 이 플레이가 아니다.
-
-    판정은 두 조건을 **함께** 본다 (한쪽만으로는 샌다, 6경기 477장면 실측):
-    - obs 가 든 샷의 유형이 '투구' — 이것만 보면 77건이 걸리는데 대부분 **이 플레이
-      자신의** 투구 샷이다(삼진은 전광판이 그 투구 화면 안에 뜬다). 앞으로 당기면
-      클립이 통째로 사라진다.
-    - 그 샷의 머리(±PITCH_SNAP_SEC)에 다음 장면의 검출 투구가 있다 — 이것만 보면
-      결과 샷(타구·수비)의 머리에 걸린 검출까지 걸린다(v202 장면27: 더블플레이
-      화면이 통째로 날아간다).
-
-    둘 다 만족하는 건 4건이고(v202 장면31·v203 장면10·v1003 장면66·v1004 장면9)
-    전부 그 샷의 캡션이 "투수가 공을 던지고…"인 다음 타석이다. 샷 유형이 비어
-    있으면(분류 25%) 당기지 않는다 — 근거 없이 좁히는 쪽보다 그대로가 안전하다.
-    """
-    obs = clip.get("obs_sec")
-    if obs is None:
-        return None
-    sh = next((x for x in segs if x["s"] <= obs < x["e"]), None)
-    if sh is None or (sh.get("shot_type") or "") != "투구":
-        return None
-    p = next((p for p in _next_pitches(clip, scenes)
-              if abs(p - sh["s"]) <= PITCH_SNAP_SEC), None)
-    return None if p is None else (sh["s"], p)
-
-
 def _pitch_idx(span: list[dict], pitch: float | None) -> int | None:
     """투구 화면인 세그먼트의 인덱스 — 경계 부스러기면 다음으로 스냅.
 
@@ -286,28 +243,60 @@ def _pitch_idx(span: list[dict], pitch: float | None) -> int | None:
     return i
 
 
-def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: float,
-               obs: float | None, ce: float,
-               npitch: float | None = None) -> tuple[list[dict], list[dict]]:
-    """세그먼트 골격 → (줄 목록, 후보 목록). 번호는 줄과 후보가 같은 순서로 공유한다.
+def _next_pitch_cut(clip: dict, scenes: list[dict]) -> float | None:
+    """결과 전광판 초가 **다음 장면의 검출 투구 구간** 안이면 그 투구의 시작 초.
 
-    접는 기준은 "모델에게 보여 줄 게 없는 줄"이다 — 화면 설명도 해설도 마커도 없고
-    지금 자리도 아닌 세그먼트. 샷 캡션이 25%만 채워져 있어(v201 4,013샷 중 1,000)
-    접지 않으면 '(설명 없음)' 줄이 대부분이 된다.
+    전광판(obs_sec)은 결과가 난 시점이지만 검출이 늦어, 그 초가 이미 다음 타석의
+    투구와 겹치는 일이 있다. 그러면 관측 하한(cut.obs_floor)이 다음 투구를 물고,
+    끝 후보 창의 상한도 거기까지 열린다 — 이 플레이가 아니다. 그 투구 **앞**이
+    상한이 된다.
+
+    **구간은 세그먼트가 아니라 초로 잡는다** (2026-08-24 결정). 재료인
+    t_scene_baseball.pitch_idxs 가 이미 (시작, 끝) 초 구간이고, 판정을 세그먼트로
+    옮기면 "전광판이 든 샷이 '투구'" 라는 조건이 되는데 그게 6경기 477장면 중
+    77건이다 — 대부분 **이 플레이 자신의** 투구 샷이다(삼진은 전광판이 그 투구
+    화면 안에 뜬다). 앞으로 당기면 클립이 통째로 사라진다.
+
+    초 기준으로는 9건이 걸린다(v201 장면77 · v202 장면27·31·45 · v203 장면10 ·
+    v1003 장면38·66·84 · v1004 장면9). 당김이 창을 비우면(하한 위로 못 올라오면)
+    이 노드는 그 클립을 그냥 건너뛴다 — 컷이 정한 끝이 그대로 남는다.
     """
-    lines: list[dict] = []
-    ends: list[dict] = []
-    fold: list[dict] = []
-    seen: set[tuple[float, float]] = set()
+    obs = clip.get("obs_sec")
+    if obs is None:
+        return None
+    for sc in scenes:
+        if sc["scene_id"] <= clip["scene_id"]:
+            continue
+        for ps, pe in sc.get("pitches") or ():
+            if ps <= obs <= pe:
+                return float(ps)
+    return None
 
-    def flush() -> None:
-        if fold:
-            lines.append({"kind": "fold", "at": fold[0]["s"], "n": len(fold)})
-            fold.clear()
 
+def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: float,
+               hi_utt: float, obs: float | None, ce: float,
+               npitch: float | None = None) -> tuple[list[dict], list[dict]]:
+    """화면·해설을 **한 줄기로 합친** (줄 목록, 후보 목록). 번호는 둘이 같이 쓴다.
+
+    2026-08-24 (2차) — 후보에 해설을 넣는다. 이전에는 세그먼트만 후보였고 해설은
+    그 밑에 딸린 부속이었다. 그래서 "이 해설이 끝나는 자리"를 고를 수가 없었다 —
+    결과를 설명하는 문장이 화면 경계와 어긋나면(흔하다) 문장 도중에 끊거나 다음
+    화면까지 통째로 물고 가는 두 선택지뿐이었다. 이제 화면 줄과 해설 줄이 나란히
+    시간순으로 서고, 어느 쪽이든 그 줄의 **끝**이 클립의 끝이 된다.
+
+    줄의 종류:
+    - seg — 세그먼트 1개. `[장면-유형] 설명`.
+    - utt — 발화 1개. `[해설] "원문"`.
+    - cur — 지금 컷이 끊기는 자리. 시각 하나뿐이고 번호가 없다.
+
+    **화면 설명이 없는 세그먼트는 줄로 내지 않는다** (샷 캡션이 25%만 채워져 있다 —
+    v201 4,013샷 중 1,000). 고를 근거가 줄 안에 없는 선택지라 모델이 판별자를 찾다
+    사고를 태운다(_sig). 다만 마커가 붙은 줄(장면 시작·투구·결과 전광판·다음 타석
+    투구)은 설명이 없어도 남긴다 — 마커 자체가 그 줄의 정보이고, 지우면 이 플레이의
+    기준점이 프롬프트에서 사라진다.
+    """
+    items: list[dict] = []
     for k, x in enumerate(span):
-        said = [(us, ue, t) for us, ue, t in utts
-                if us < x["e"] and ue > x["s"] and (us, ue) not in seen]
         marks = []
         if k == 0:
             marks.append("장면 시작")
@@ -320,37 +309,50 @@ def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: f
         # 여기서 끊기는지가 그 줄 하나로 읽힌다.
         if npitch is not None and x["s"] <= npitch < x["e"]:
             marks.append("다음 타석 투구")
-        is_cur = abs(x["s"] - ce) < 1
-        if not (x["shot"] or said or marks or is_cur):
-            fold.append(x)
+        if not (x["shot"] or marks):
             continue
-        flush()
-        line = {"kind": "cur" if is_cur else "seg", "at": x["s"],
-                "shot_type": x["shot_type"], "shot": x["shot"], "marks": marks,
-                "utts": [t for _us, _ue, t in said]}
-        # 자를 수 있는 자리 = 투구 이후 · 결과 해설이 끝나기 전 · 광고 아님 · 지금 자리 아님.
-        # **변별 재료(캡션·해설) 유무는 안 따진다** — 창이 [투구, 결과 해설 끝]으로
-        # 좁아져 후보가 몇 개 안 되고, 결과 직후의 무캡션 세그먼트가 정작 끊어야 할
-        # 자리인 경우가 많다(v1004 장면1: 결과 직후 두 컷이 캡션 없어 접히는 바람에
-        # 후보가 18초·48초 뒤 두 개뿐이었다).
-        # 비교 대상은 세그먼트의 **끝**이다 — 고르는 게 끝이고 lo 는 "클립이 이보다
-        # 짧으면 안 된다"는 하한이라 끝에 걸어야 한다. 시작으로 걸면 결과 자리를
-        # 통째로 놓친다 (v1003 장면1: 정답인 리액션 샷 끝 882.7 이 시작 872.8 < lo 876
-        # 때문에 탈락해 후보가 0이 됐다).
-        if (not is_cur and lo < x["e"] <= hi
-                and x["shot_type"] not in SKIP_SHOT_TYPES and abs(x["e"] - ce) >= 1):
-            ends.append({"sec": x["e"], "at": x["s"], "shot_type": x["shot_type"],
-                         "shot": x["shot"]})
-            line["num"] = len(ends)
-        lines.append(line)
-        seen.update((us, ue) for us, ue, _t in said)
-    flush()
+        items.append({"kind": "seg", "s": x["s"], "e": x["e"], "marks": marks,
+                      "shot_type": x["shot_type"], "shot": x["shot"]})
+    # 해설은 **장면 구간에 걸친 것 전량**이다 — 후보가 되는 건 창 안에서 끝나는
+    # 것뿐이지만, 창 밖 발화도 서사로 읽힌다(해설이 이미 다음 타석으로 넘어갔다는
+    # 판단이 거기서 나온다).
+    items += [{"kind": "utt", "s": us, "e": ue, "text": t} for us, ue, t in utts
+              if us < span[-1]["e"] and ue > span[0]["s"]]
+    items.append({"kind": "cur", "s": ce, "e": ce})
+    # 같은 초면 화면(seg) → 해설(utt) → 현재(cur) 순. 현재를 뒤에 두는 건 "여기까지가
+    # 지금 클립"이 시각적으로 맞기 때문이다.
+    items.sort(key=lambda it: (it["s"], {"seg": 0, "utt": 1, "cur": 2}[it["kind"]]))
+
+    lines: list[dict] = []
+    ends: list[dict] = []
+    for it in items:
+        # 자를 수 있는 자리 = 그 줄의 **끝**이 창 안 · 광고 아님 · 지금 자리 아님 ·
+        # 앞선 후보와 같은 지점 아님.
+        # 창의 상한은 종류마다 다르다: 화면은 결과 전광판(hi)까지, **해설은 그 뒤도
+        # 된다**(hi_utt = 다음 타석 투구 앞, 없으면 장면 끝). 결과를 설명하는 문장은
+        # 전광판보다 늦게 끝나는 게 보통이라(v1004 장면4: 전광판 00:08:26, 그 결과를
+        # 말하는 해설은 00:08:34 에 끝난다) 해설까지 전광판에 걸면 남는 후보가 문장을
+        # 도중에 자르는 자리뿐이다. cut._snap_tail 이 대사 꼬리를 최대 9초 늘려 주는
+        # 것과 같은 취지다 — 화면은 이 플레이 것만, 말은 끝까지.
+        # 비교 대상이 끝인 이유: 고르는 게 끝이고 lo 는 "클립이 이보다 짧으면 안 된다"는
+        # 하한이라 끝에 걸어야 한다. 시작으로 걸면 결과 자리를 통째로 놓친다
+        # (v1003 장면1: 정답인 리액션 샷 끝 882.7 이 시작 872.8 < lo 876 때문에 탈락).
+        top = hi_utt if it["kind"] == "utt" else hi
+        if (it["kind"] != "cur" and lo < it["e"] <= top
+                and it.get("shot_type") not in SKIP_SHOT_TYPES
+                and abs(it["e"] - ce) >= END_MERGE_SEC
+                and all(abs(it["e"] - d["sec"]) >= END_MERGE_SEC for d in ends)):
+            ends.append({"sec": it["e"], "at": it["s"], "kind": it["kind"],
+                         "shot_type": it.get("shot_type", ""),
+                         "text": it.get("shot") or it.get("text", "")})
+            it["num"] = len(ends)
+        lines.append(it)
     return lines, ends
 
 
 def end_rows(clips: list[dict], segs: list[dict], utts: list,
              scenes: list[dict] | None = None) -> list[dict]:
-    """refine_end_bound 에 낼 행 — **장면 전체를 세그먼트 한 줄기로** 편다.
+    """refine_end_bound 에 낼 행 — **화면과 해설을 시간순 한 줄기로** 편다.
 
     **모든 클립이 대상**이다(앵커 유무 무관). 끝은 코드가 답할 수 없는 질문이라
     앵커가 잡힌 클립도 끝은 물어야 한다.
@@ -362,28 +364,34 @@ def end_rows(clips: list[dict], segs: list[dict], utts: list,
     - **늘리기만 됐다.** 리플레이·관중 리액션까지 물고 늘어진 컷(v1004 장면20 은
       69초)을 되돌릴 후보가 아예 없었다.
 
-    이제 장면 시작부터 장면 끝까지 세그먼트를 시간순으로 다 싣고, 그중 **투구
-    이후의 자를 수 있는 자리**에만 번호를 붙인다. 서사와 선택지가 같은 줄이다.
+    같은 날 2차로 **해설을 후보에 올렸다**. 화면만 후보였을 때는 "이 문장이 끝나는
+    자리"를 고를 수가 없어서, 결과를 설명하는 해설이 화면 경계와 어긋나면(흔하다)
+    문장 도중에 끊거나 다음 화면을 통째로 무는 두 선택지뿐이었다.
 
-    줄(lines)의 종류:
-    - seg  — 세그먼트 1개. 표시 시각은 **시작**(그 화면이 시작하는 자리), 번호가
-             붙었으면 고를 수 있다. 고르면 컷 끝은 그 세그먼트의 **끝**이 된다
-             (ends[번호-1]["sec"]) — 고른 화면까지 클립에 들어간다.
-    - fold — 화면 설명도 해설도 마커도 없는 연속 구간을 한 줄로 접은 것. 번호 없음.
-             샷 캡션이 25%만 채워져 있어(v201 4,013샷 중 1,000) 접지 않으면
-             '(설명 없음)' 줄이 15개 중 13개가 된다 — 고를 근거가 없는 선택지다.
-    - cur  — 지금 컷이 끝나는 자리. 세그먼트 시작과 맞으면 그 줄이 cur 이 되고,
-             안 맞으면(장면 끝까지 쓰는 클립이 흔하다) 그 자리의 화면·해설을 붙여
-             맨 뒤에 따로 낸다.
+    줄(lines)의 종류 — 셋 다 `시작 ~ 끝` 시각을 달고 시간순으로 한 줄기다:
+    - seg — 세그먼트 1개(`[장면-유형] 설명`). 고르면 컷 끝은 그 화면의 끝이다.
+            **설명 없는 세그먼트는 줄로 내지 않는다**(마커가 붙은 것은 예외) —
+            근거는 _end_lines.
+    - utt — 발화 1개(`[해설] "원문"`). 고르면 컷 끝은 그 말이 끝나는 자리다.
+    - cur — 지금 컷이 끝나는 자리. 시각 하나뿐이고 번호가 없다.
 
     마커(marks): 장면 시작 · 투구 · 결과 전광판(cut.obs_floor — 전이 원장이 보증하는
     결과 관측) · 다음 타석 투구. 관측 하한을 후보에서 잘라 내는 대신 마커로 보여 주고
     판단을 맡긴다 — v1004 장면20 은 전광판이 결과보다 한참 뒤(00:42:26)에 찍혀, 잘라
     냈으면 이 장면은 손댈 방법이 없었다.
 
-    후보 창의 상한은 결과 전광판이되, 그 전광판이 **다음 타석의 투구 화면**에 찍혔으면
-    그 화면 앞까지다 (_next_pitch_cut). 전광판 줄에는 두 마커가 함께 붙어, 번호가 왜
-    거기서 끊기는지가 한 줄로 읽힌다.
+    창의 상한은 **종류마다 다르다**:
+    - 화면(seg) — 결과 전광판까지. 그 뒤 화면은 이 플레이가 아니다.
+    - 해설(utt) — 다음 타석 투구 앞까지(없으면 장면 끝). 결과를 설명하는 문장은
+      전광판보다 늦게 끝나는 게 보통이라 전광판에 걸면 문장을 자르는 자리만 남는다
+      (v1004 장면4: 전광판 00:08:26, 그 결과를 말하는 해설의 끝은 00:08:34).
+
+    전광판 초가 다음 장면의 검출 투구 구간 안이면 두 상한 모두 그 투구 앞으로
+    당겨진다 (_next_pitch_cut). 그 자리의 줄에 '다음 타석 투구' 마커가 붙어, 번호가
+    왜 거기서 끊기는지가 한 줄로 읽힌다.
+
+    실측(6경기 477클립): 물어봄 436 · 후보 0 이라 건너뜀 41 · 후보수 p50 5 · p90 13 ·
+    max 36(화면 960 · 해설 1,687) · 프롬프트 p50 858자 · max 3,837자.
     """
     rows = []
     for c in clips:
@@ -400,13 +408,14 @@ def end_rows(clips: list[dict], segs: list[dict], utts: list,
         # 전광판이 다음 타석의 투구 화면에 찍혔으면 그 **앞에서** 끊는다.
         # 전광판은 결과가 난 시점인데 검출이 늦어 다음 투구와 같은 화면에 걸린 것이라,
         # 그 화면까지 열어 두면 클립이 다음 타석의 투구를 물고 끝난다.
-        pull = _next_pitch_cut(c, segs, scenes or [])
-        npitch = None
-        if pull is not None:
-            npitch, hi = pull[0], min(hi, pull[0])
+        npitch = _next_pitch_cut(c, scenes or [])
+        if npitch is not None:
+            hi = min(hi, npitch)
 
-        lines, ends = _end_lines(span, utts, pi=pi, lo=lo, hi=hi, obs=obs, ce=ce,
-                                 npitch=npitch)
+        # 해설의 상한 — 전광판이 아니라 다음 타석 투구(없으면 장면 끝)다.
+        hi_utt = c["e"] if npitch is None else npitch
+        lines, ends = _end_lines(span, utts, pi=pi, lo=lo, hi=hi, hi_utt=hi_utt,
+                                 obs=obs, ce=ce, npitch=npitch)
 
         if not ends:
             continue
