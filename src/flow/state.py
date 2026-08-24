@@ -29,6 +29,10 @@ class Inventory:
     # bounds 모듈 docstring: 다른 타석 투구가 시작 후보로 새던 자리).
     # `trans`(전광판 전이)는 없앴다 — score_match 폐기로 읽는 코드가 사라졌고,
     # 그 사이 상류에서 t_transition_baseball 테이블 자체가 삭제됐다 (2026-08-23).
+    # 전광판 투구 검출(pitching_yn='Y') 관측 초 — 끝 보정이 "여기부터 다음 타자"를
+    # 프롬프트에 실어 주는 재료다 (repos.fetch_pitch_obs). 요청당 1회 조회해 여기
+    # 담아 두고, 클립마다 다시 묻지 않는다 — 위 불변 규약과 같은 이유다.
+    pitch_obs: tuple[float, ...] = ()
 
 
 class ComposeState(TypedDict, total=False):

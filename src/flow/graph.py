@@ -162,7 +162,8 @@ def build_graph(llm: ChatLLM, embedder: Embedder, store: VectorStore, settings=N
         if not use_refine or not clips:
             return _skipped(st, "refine_end_bound", clips,
                             "보정 꺼짐" if not use_refine else "클립 없음")
-        rows = bounds_mod.end_rows(clips, list(inv.segs), inv.utts, list(inv.scenes))
+        rows = bounds_mod.end_rows(clips, list(inv.segs), inv.utts, list(inv.scenes),
+                                   inv.pitch_obs)
         log.info("refine_end_bound 대상 %d/%d클립", len(rows), len(clips))
         if not rows:
             return _skipped(st, "refine_end_bound", clips, "후보 없음")

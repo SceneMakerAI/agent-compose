@@ -92,6 +92,15 @@ SKIP_SHOT_TYPES = frozenset({"광고"})
 # 실측 간격이 최대 0.70초라 1.0 이면 전부 덮고, 샷 중앙 길이(3~4초)보다 한참 짧아
 # 다음 장면을 끌어오지 않는다. 1.0~3.0 을 훑어도 결과가 같아 가장 좁은 값을 썼다.
 CAND_SHOT_SNAP_SEC = 1.0
+# 전광판 투구 검출(pitching_yn='Y') 관측이 이보다 촘촘하면 **같은 투구**다.
+# 보드 관측이 ~2초 간격이라 투구 1회가 2~3행으로 남는다 — 6경기 실측에서 Y 관측
+# 3,612건이 이 값으로 접으면 1,519개 투구가 된다. 접지 않으면 같은 투구가 프롬프트에
+# 여러 줄로 실려 "다음 투구가 여러 번 있었다"로 읽힌다.
+PITCH_OBS_RUN_GAP = 4.0
+# 그 장면 자신의 투구로부터 이 안쪽의 검출은 **이 플레이 것**이라 줄로 내지 않는다.
+# v1004 장면5 실측: 장면 투구 663s 의 검출이 664·666s 에 남는다 — 그걸 "다음 투구"로
+# 내면 자기 투구 앞에서 끊으라는 말이 된다. 이 값 밖의 검출만 남긴다.
+PITCH_OBS_AFTER_SEC = 5.0
 # 시작을 그대로 믿는 앵커 샷 유형 — 이 화면이면 시작 보정을 묻지 않는다.
 # '투구'는 그 자체로 맞고, '리액션'은 타석 준비 화면이라 투구 직전일 수 있다.
 # 나머지(타구·수비·주루·득점·홈인·광고·기타·미분류·앵커 없음)는 시작이 이미
@@ -273,9 +282,65 @@ def _next_pitch_cut(clip: dict, scenes: list[dict]) -> float | None:
     return None
 
 
+def _pitch_obs_lines(clip: dict, pitch_obs) -> list[float]:
+    """장면 안의 '다음 투구' 관측 초 — 그 플레이 자신의 투구는 뺀 뒤 접은 값.
+
+    2026-08-24. 이 플레이가 끝났는지를 전광판이 직접 말해 주는 유일한 자리다.
+    후보를 자르지는 **않는다** — 줄로만 끼워 넣고 판단은 모델이 한다. 관측 하한을
+    '결과 전광판' 마커로만 보여 주는 것과 같은 처방이다(모듈 docstring).
+
+    거르는 건 셋이다:
+    - 장면 구간 밖 — 다른 장면의 이야기다.
+    - 그 장면 자신의 투구로부터 PITCH_OBS_AFTER_SEC 안쪽 — 자기 투구의 검출이다.
+    - **결과 전광판보다 이른 검출** — 결과가 뜨기 전의 투구는 다음 타자일 수 없다.
+      파울처럼 같은 타석이 더 던진 자리이거나 이 투구의 늦은 검출이다. 원장에 관측이
+      없는 장면(obs=None)은 이 조건을 걸지 않는다 — 자를 근거가 없다.
+
+    실측(6경기 477장면 / 후보가 선 436행):
+    - 줄이 붙는 행 260 · 총 273줄 — 행당 평균 0.6줄. 후보 2,647개 중 206개(146행)가
+      '다음 투구 이후' 꼬리표를 단다.
+    - **후보는 한 개도 안 줄어든다**(436행 전부 후보 목록 동일) — 이 신호는 자르지
+      않고 보여 주기만 한다.
+    - 이 셋을 다 걸었을 때 "후보 전부가 다음 투구 이후"(= 고를 자리가 없어 모델이
+      '유지'밖에 못 하는 행)가 **2행(0.5%)** 이다. 결과 전광판 조건을 빼면 25행,
+      접기 순서까지 틀리면 86행으로 뛴다. 세 조건이 다 필요하다.
+    """
+    if not pitch_obs:
+        return []
+    s, e = clip["s"], clip["e"]
+    floor = (clip["pitch_sec"] if clip.get("pitch_sec") is not None else s)
+    # 결과 전광판과 **같은 초**는 통과다. v1004 장면5 가 정확히 그 모양이다 — 전광판이
+    # 49초간 가려졌다가 다음 타자의 투구가 이미 진행 중일 때 돌아와, 결과 관측과 다음
+    # 투구가 같은 행(00:11:59)에 찍혔다. 여기서 '초과'로 걸면 이 건이 통째로 빠진다.
+    obs = clip.get("obs_sec")
+    lo_obs = -float("inf") if obs is None else float(obs)
+    # **접기가 거르기보다 먼저다.** 뒤집으면 그 플레이 자신의 투구 검출 꼬리가 살아남아
+    # 다음 투구로 둔갑한다 — 앞자리(664·666)가 AFTER 필터에 잘려 나가면서 같은 런의
+    # 끝자락(670)이 런의 첫 자리가 돼 버린다. 실측에서 이 순서를 뒤집었더니 436행 중
+    # 86행이 "후보 전부가 다음 투구 이후"가 됐다(= 고를 자리가 남지 않는다).
+    return [x for x in _run_starts(pitch_obs)
+            if s <= x <= e and x > floor + PITCH_OBS_AFTER_SEC and x >= lo_obs]
+
+
+def _run_starts(pitch_obs) -> list[float]:
+    """연속 관측을 한 투구로 접은 **런의 첫 관측** 목록 (전 경기 단위).
+
+    보드 관측이 ~2초 간격이라 투구 1회가 2~3행으로 남는다. 6경기 Y 관측 3,612건이
+    PITCH_OBS_RUN_GAP 으로 접으면 1,519개 투구가 된다.
+    """
+    out: list[float] = []
+    last: float | None = None
+    for x in sorted(float(v) for v in pitch_obs):
+        if last is None or x - last > PITCH_OBS_RUN_GAP:
+            out.append(x)
+        last = x
+    return out
+
+
 def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: float,
                hi_utt: float, obs: float | None, ce: float,
-               npitch: float | None = None) -> tuple[list[dict], list[dict]]:
+               npitch: float | None = None,
+               pobs: list[float] | None = None) -> tuple[list[dict], list[dict]]:
     """화면·해설을 **한 줄기로 합친** (줄 목록, 후보 목록). 번호는 둘이 같이 쓴다.
 
     2026-08-24 (2차) — 후보에 해설을 넣는다. 이전에는 세그먼트만 후보였고 해설은
@@ -287,6 +352,8 @@ def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: f
     줄의 종류:
     - seg — 세그먼트 1개. `[장면-유형] 설명`.
     - utt — 발화 1개. `[해설] "원문"`.
+    - pitch — 전광판이 검출한 **다음 투구**. 시각 하나뿐이고 번호가 없다
+      (_pitch_obs_lines). 고를 수 있는 자리가 아니라 "여기부터 다음 타자"라는 표지다.
     - cur — 지금 컷이 끊기는 자리. 시각 하나뿐이고 번호가 없다.
 
     **화면 설명이 없는 세그먼트는 줄로 내지 않는다** (샷 캡션이 25%만 채워져 있다 —
@@ -318,11 +385,17 @@ def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: f
     # 판단이 거기서 나온다).
     items += [{"kind": "utt", "s": us, "e": ue, "text": t} for us, ue, t in utts
               if us < span[-1]["e"] and ue > span[0]["s"]]
+    items += [{"kind": "pitch", "s": x, "e": x} for x in (pobs or ())]
     items.append({"kind": "cur", "s": ce, "e": ce})
-    # 같은 초면 화면(seg) → 해설(utt) → 현재(cur) 순. 현재를 뒤에 두는 건 "여기까지가
-    # 지금 클립"이 시각적으로 맞기 때문이다.
-    items.sort(key=lambda it: (it["s"], {"seg": 0, "utt": 1, "cur": 2}[it["kind"]]))
+    # 같은 초면 화면(seg) → 해설(utt) → 다음 투구(pitch) → 현재(cur) 순. 현재를 뒤에
+    # 두는 건 "여기까지가 지금 클립"이 시각적으로 맞기 때문이고, 투구 표지를 화면·해설
+    # 뒤에 두는 건 그 자리의 줄들이 **아직 이 플레이**라서다 — 표지가 위로 오면 같은
+    # 초의 후보가 이미 다음 타석인 것처럼 읽힌다.
+    items.sort(key=lambda it: (it["s"],
+                               {"seg": 0, "utt": 1, "pitch": 2, "cur": 3}[it["kind"]]))
 
+    # 경계는 **첫** 검출이다 — 그 뒤는 전부 다음 타석이라 더 볼 것이 없다.
+    p0 = min(pobs) if pobs else None
     lines: list[dict] = []
     ends: list[dict] = []
     for it in items:
@@ -338,7 +411,9 @@ def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: f
         # 하한이라 끝에 걸어야 한다. 시작으로 걸면 결과 자리를 통째로 놓친다
         # (v1003 장면1: 정답인 리액션 샷 끝 882.7 이 시작 872.8 < lo 876 때문에 탈락).
         top = hi_utt if it["kind"] == "utt" else hi
-        if (it["kind"] != "cur" and lo < it["e"] <= top
+        # 번호는 화면·해설에만 붙는다 — 'cur'(지금 자리)도 'pitch'(다음 투구 표지)도
+        # 고를 수 있는 자리가 아니다. pitch 는 e == s 라 조건만으로는 걸러지지 않는다.
+        if (it["kind"] in ("seg", "utt") and lo < it["e"] <= top
                 and it.get("shot_type") not in SKIP_SHOT_TYPES
                 and abs(it["e"] - ce) >= END_MERGE_SEC
                 and all(abs(it["e"] - d["sec"]) >= END_MERGE_SEC for d in ends)):
@@ -346,12 +421,23 @@ def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: f
                          "shot_type": it.get("shot_type", ""),
                          "text": it.get("shot") or it.get("text", "")})
             it["num"] = len(ends)
+            # 그 줄이 '다음 투구' 자리를 넘어 끝나면 **후보 줄 자신에** 표시를 단다.
+            # 표지 줄만으로는 안 먹혔다 (2026-08-24 실측, v1004 장면5). 줄은 **시작**
+            # 시각 순으로 서는데 문제의 후보 15번은 00:11:50~00:11:59 라, 11:59 표지가
+            # 시간순 제 자리에 서면 그 후보보다 **아래**에 찍힌다 — 모델이 이미 고른
+            # 뒤에 읽는다. 규칙 문구만 강화한 판은 3회 모두 15를 그대로 냈고, 이 표시를
+            # 붙인 판이 3회 모두 12로 바뀌었다.
+            # 후보를 지우지는 않는다 — 이 신호는 전광판 검출이라 오검출로도 서는데,
+            # 자르면 그 오검출이 고를 자리를 통째로 없앤다 (end_rows docstring).
+            if p0 is not None and it["e"] >= p0:
+                it["after_pitch"] = True
         lines.append(it)
     return lines, ends
 
 
 def end_rows(clips: list[dict], segs: list[dict], utts: list,
-             scenes: list[dict] | None = None) -> list[dict]:
+             scenes: list[dict] | None = None,
+             pitch_obs=()) -> list[dict]:
     """refine_end_bound 에 낼 행 — **화면과 해설을 시간순 한 줄기로** 편다.
 
     **모든 클립이 대상**이다(앵커 유무 무관). 끝은 코드가 답할 수 없는 질문이라
@@ -368,11 +454,16 @@ def end_rows(clips: list[dict], segs: list[dict], utts: list,
     자리"를 고를 수가 없어서, 결과를 설명하는 해설이 화면 경계와 어긋나면(흔하다)
     문장 도중에 끊거나 다음 화면을 통째로 무는 두 선택지뿐이었다.
 
-    줄(lines)의 종류 — 셋 다 `시작 ~ 끝` 시각을 달고 시간순으로 한 줄기다:
+    줄(lines)의 종류 — 앞의 둘은 `시작 ~ 끝` 시각을 달고 시간순으로 한 줄기다:
     - seg — 세그먼트 1개(`[장면-유형] 설명`). 고르면 컷 끝은 그 화면의 끝이다.
             **설명 없는 세그먼트는 줄로 내지 않는다**(마커가 붙은 것은 예외) —
             근거는 _end_lines.
     - utt — 발화 1개(`[해설] "원문"`). 고르면 컷 끝은 그 말이 끝나는 자리다.
+    - pitch — 전광판이 검출한 **다음 투구**(2026-08-24 추가). 번호가 없다.
+            재료는 `pitch_obs`(repos.fetch_pitch_obs)이고 거르는 규칙은
+            _pitch_obs_lines. 상한을 당기지는 않는다 — 표지만 세우고 판단은 모델이
+            한다. 이유는 이 신호가 전광판 검출이라 리플레이·오검출로도 서는데,
+            자르면 그 오검출이 클립을 통째로 날리기 때문이다.
     - cur — 지금 컷이 끝나는 자리. 시각 하나뿐이고 번호가 없다.
 
     마커(marks): 장면 시작 · 투구 · 결과 전광판(cut.obs_floor — 전이 원장이 보증하는
@@ -415,7 +506,8 @@ def end_rows(clips: list[dict], segs: list[dict], utts: list,
         # 해설의 상한 — 전광판이 아니라 다음 타석 투구(없으면 장면 끝)다.
         hi_utt = c["e"] if npitch is None else npitch
         lines, ends = _end_lines(span, utts, pi=pi, lo=lo, hi=hi, hi_utt=hi_utt,
-                                 obs=obs, ce=ce, npitch=npitch)
+                                 obs=obs, ce=ce, npitch=npitch,
+                                 pobs=_pitch_obs_lines(c, pitch_obs))
 
         if not ends:
             continue

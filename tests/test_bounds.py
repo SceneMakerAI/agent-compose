@@ -353,6 +353,53 @@ def test_end_rows_current_line_carries_shot_and_speech():
     assert cur["shot_type"] == "광고" or cur["shot"] or cur["utts"]
 
 
+def test_end_rows_insert_next_pitch_marker():
+    """전광판 투구 검출이 '다음 투구' 줄로 끼어든다 — 번호는 안 붙고 후보도 안 줄인다.
+
+    결과 태그가 없는 타석은 t_scene_baseball 행이 되지 않아 `pitch_idxs` 로도 안
+    잡힌다(v1004 장면5: 다음 타자의 첫 투구 719s). 전광판 관측만이 그걸 안다.
+    """
+    c = _end_clip()
+    # 104·106·108 은 그 장면 자신의 투구(106) 검출 — PITCH_OBS_AFTER_SEC 안쪽이라 뺀다.
+    # 130·132 는 같은 투구의 연속 관측이라 첫 자리 하나로 접힌다.
+    obs = (104.0, 106.0, 108.0, 130.0, 132.0)
+    base = bounds.end_rows([_end_clip()], _SEGS_E, _UTTS_E)[0]
+    row = bounds.end_rows([c], _SEGS_E, _UTTS_E, None, obs)[0]
+
+    pitches = [ln for ln in row["lines"] if ln["kind"] == "pitch"]
+    assert [ln["s"] for ln in pitches] == [130.0]
+    assert all(not ln.get("num") for ln in pitches)      # 고를 수 있는 자리가 아니다
+    assert len(row["ends"]) == len(base["ends"])         # 후보를 자르지는 않는다
+    ss = [ln["s"] for ln in row["lines"]]
+    assert ss == sorted(ss)                              # 시간순 한 줄기를 유지한다
+
+
+def test_end_rows_tag_candidates_past_next_pitch():
+    """검출 자리를 넘어 끝나는 후보는 그 줄 자신에 표시가 붙는다.
+
+    표지 줄은 시간순 제 자리에 서는데 줄은 **시작** 시각 순이라, 표지가 정작 문제의
+    후보보다 아래에 찍힌다 — 실측 근거는 bounds._end_lines.
+    """
+    row = bounds.end_rows([_end_clip()], _SEGS_E, _UTTS_E, None, (130.0,))[0]
+    tagged = {ln["e"] for ln in row["lines"] if ln.get("after_pitch")}
+    assert tagged and all(e >= 130.0 for e in tagged)
+    assert all(ln.get("num") for ln in row["lines"] if ln.get("after_pitch"))
+    # 넘지 않는 후보는 깨끗하다 — 표시가 전부에 붙으면 신호가 아니다.
+    assert any(ln.get("num") and not ln.get("after_pitch") for ln in row["lines"])
+
+
+def test_end_user_renders_next_pitch_line():
+    """'다음 투구)'는 시각 하나 — '현재 끝점)'과 같은 표지 꼴이고, 넘는 후보엔 꼬리표."""
+    from flow.prompts import AFTER_PITCH_TAIL, end_user
+
+    rows = bounds.end_rows([_end_clip()], _SEGS_E, _UTTS_E, None, (130.0,))
+    text = end_user(rows)
+    assert "  다음 투구) 00:02:10" in text
+    assert AFTER_PITCH_TAIL in text
+    assert text.count(AFTER_PITCH_TAIL) == sum(
+        1 for ln in rows[0]["lines"] if ln.get("after_pitch"))
+
+
 def test_end_user_renders_skeleton():
     """프롬프트 = 머리 + [진행] + 시간순 줄 + [질문]. 화면·해설은 전문 그대로."""
     from flow.prompts import end_user

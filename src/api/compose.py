@@ -138,6 +138,7 @@ async def _compose_once(st, req: ComposeRequest, progress: list[str]) -> dict:
     inv = Inventory(
         v_id=req.v_id, scenes=tuple(scenes), segs=tuple(segs), utts=utts,
         game_line=game_line,
+        pitch_obs=await repo.fetch_pitch_obs(req.v_id),
     )
     tr = Trace(st.settings.trace_dir, req.v_id, req.query)
 

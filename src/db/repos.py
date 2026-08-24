@@ -249,6 +249,31 @@ class SourceRepo:
             return [(float(s), float(e), (t or "").strip())
                     for s, e, t in await cur.fetchall()]
 
+    async def fetch_pitch_obs(self, v_id: int) -> tuple[float, ...]:
+        """
+        Summary:
+            전광판이 투구를 검출한 관측 초 전량 (t_scoreboard_baseball.pitching_yn='Y').
+        Args:
+            v_id (int): 대상 영상 id.
+        Returns:
+            tuple[float, ...]: 관측 초, 시간순. 접거나 거르지 않은 **원본 관측**이다.
+        Description:
+            - 끝 보정 프롬프트에 "이 자리부터 다음 타자다"를 실어 주는 유일한 재료다
+              (bounds._pitch_obs_lines). 장면 테이블로는 알 수 없다 — 결과 태그가
+              없는 타석은 t_scene_baseball 행이 되지 않아 `pitch_idxs` 로도 안 잡힌다
+              (v1004 장면5 실측: 다음 타자 노진혁의 첫 투구 719s 가 어느 장면의
+              pitch_idxs 에도 없어 _next_pitch_cut 이 통째로 비켜갔다).
+            - 관측은 ~2초 간격이라 투구 1회가 여러 행으로 남는다. **접는 건 bounds 가
+              한다** — 몇 초를 같은 투구로 볼지는 조회가 아니라 판단이다.
+        """
+        sql = (
+            "SELECT TIME_TO_SEC(idx_time) FROM t_scoreboard_baseball "
+            "WHERE v_id = %s AND pitching_yn = 'Y' ORDER BY idx"
+        )
+        async with self._db.acquire() as conn, conn.cursor() as cur:
+            await cur.execute(sql, (v_id,))
+            return tuple(float(s) for (s,) in await cur.fetchall() if s is not None)
+
     async def fetch_etc_rows(self, v_id: int) -> list[tuple[int, str]]:
         """
         Summary:
