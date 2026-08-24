@@ -51,6 +51,7 @@ MIN_CLIP_SEC 은 여기서도 지킨다 — 투구 직후 1초짜리 후보를 �
 import math
 import re
 
+from flow import cut
 from log import get_logger
 
 log = get_logger(__name__)
@@ -72,6 +73,8 @@ CAND_MAX = 4
 COINCIDE_SEC = 2.0
 # 끝 후보를 장면 끝(end_time) 밖으로 낼 폭 — 근거는 모듈 docstring.
 # 시작에는 없는 값이다(시작 후보는 장면 자신의 pitch_idxs 뿐이라 밖이 존재하지 않는다).
+# **이 값을 올릴 거면 다음 장면 침범을 같이 막아야 한다.** 5초는 6경기 실측 장면 간격
+# (min 10.0s · p50 157s)보다 좁아 다음 장면에 닿지 않으므로 클램프를 두지 않았다.
 END_OUT_EXT_SEC = 5.0
 # 후보로 쓰지 않는 샷 유형 — 광고 경계를 클립 끝으로 삼으면 중계가 아닌 데서 끊긴다.
 # (v201 장면5 실측: 끝 후보 넷 중 하나가 광고 경계였다.)
@@ -227,10 +230,16 @@ def end_candidates(clip: dict, segs: list[dict], utts: list) -> list:
     근거는 모듈 docstring. 두 끝 다 옮겼으므로 후보는 **현재 끝보다 앞일 수도 뒤일
     수도** 있다 — 앞이면 당기는 것이고 뒤면 미루는 것이다.
 
-    하한은 `max(투구, 컷 시작 + MIN_CLIP_SEC)` 이다. 투구는 clip["pitch_sec"]
-    (t_scene_baseball.pitch_time — 상류가 고른 그 플레이의 대표 투구)이고, 없으면
-    컷 시작을 쓴다. MIN_CLIP_SEC 을 더하는 건 투구 직후 후보를 골라 플레이가 통째로
-    사라지는 걸 막기 위해서다.
+    하한은 `max(투구, 컷 시작 + MIN_CLIP_SEC, 관측 하한)` 이다. 투구는
+    clip["pitch_sec"](t_scene_baseball.pitch_time — 상류가 고른 그 플레이의 대표
+    투구)이고, 없으면 컷 시작을 쓴다. MIN_CLIP_SEC 을 더하는 건 투구 직후 후보를
+    골라 플레이가 통째로 사라지는 걸 막기 위해서다.
+
+    **관측 하한**(cut.obs_floor)은 전이 원장이 보증하는 결과 시점이다 — 그 앞은
+    결과가 아직 안 나온 자리라 끝일 수 없다. 컷이 이미 지키는 바닥(cut._obs_floor)을
+    후보 창도 같이 지킨다. 안 걸면 6경기 3,495후보 중 939건(27%)이 결과를 버리는
+    선택지가 되고, 그런 후보를 가진 클립이 223건이다 — 그중 14건은 FULL_CLIP_TAGS
+    라 컷 쪽 바닥조차 안 걸리는(_full 경로) 클립이었다.
 
     장면 끝을 넘는 후보에는 why 에 "장면 밖"을 단다. 발행이 "여기까지가 이 사건"이라고
     정한 선을 넘는다는 사실 자체가 판단 재료다 — 숨기고 내면 모델은 그게 같은 장면
@@ -239,7 +248,8 @@ def end_candidates(clip: dict, segs: list[dict], utts: list) -> list:
     cs, ce = clip["cut"]["cs"], clip["cut"]["ce"]
     e = clip["e"]
     pitch = clip.get("pitch_sec")
-    lo = max(cs + MIN_CLIP_SEC, cs if pitch is None else float(pitch))
+    lo = max(cs + MIN_CLIP_SEC, cs if pitch is None else float(pitch),
+             cut.obs_floor(clip, segs) or 0.0)
     # 대사 꼬리(cut._snap_tail)로 ce 가 이미 장면 끝을 넘어선 클립이 있다 — 그때도
     # 확장분은 **현재 끝 기준**으로 확보한다(장면 끝 기준이면 창이 그만큼 좁아진다).
     hi = max(e, ce) + END_OUT_EXT_SEC

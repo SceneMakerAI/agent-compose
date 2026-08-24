@@ -108,14 +108,27 @@ def clip(r: dict, segs: list[dict], utts: list[tuple[float, float, str]] = ()) -
                     + ("+대사꼬리" if snapped else "")}
 
 
+def obs_floor(r: dict, segs: list[dict]) -> float | None:
+    """관측 하한 — **클립의 끝이 이보다 앞일 수 없는 시각**. obs_sec 이 없으면 None.
+
+    전이 원장이 보증하는 결과 시점(obs_sec)이 든 샷의 끝이다(장면 끝 상한). 레시피
+    체인은 샷 오분류 하나로 결과 전에 끊기므로(실측 v203 도루: '주루' 샷이 없어
+    도루 실물·리플레이가 잘림) 원장 경계 [투구→관측]로 바닥을 깐다 — 시간 상수 없음.
+
+    컷(_obs_floor)과 **끝 후보 창의 하한**(bounds.end_candidates)이 같이 쓴다. 후보
+    창의 하한이 투구로 내려가면서 관측 이전이 후보가 될 수 있게 됐는데, 그건 결과를
+    버리는 자리다 — 코드가 결정적으로 답할 수 있는 걸 모델에게 물으면 안 된다.
+    """
+    obs = r.get("obs_sec")
+    if obs is None:
+        return None
+    osh = next((x for x in segs if x["s"] <= obs < x["e"]), None)
+    return min(osh["e"] if osh else obs, r["e"])
+
+
 def _obs_floor(ce: float, obs: float | None, shots: list[dict],
                hi: float) -> tuple[float, bool]:
-    """관측 하한 — 컷은 전이 원장이 보증하는 결과 시점(obs_sec) 이전에 끝날 수 없다.
-
-    레시피 체인은 샷 오분류 하나로 결과 전에 끊긴다(실측 v203 도루: '주루' 샷이
-    없어 도루 실물·리플레이가 잘림). 원장 경계 [투구→관측]은 결정적이므로,
-    끝을 관측이 속한 샷의 끝(장면 끝 상한)까지 보장한다 — 시간 상수 없음.
-    """
+    """컷 끝을 관측 하한까지 민다 — 규칙 본체는 obs_floor."""
     if obs is None or ce >= obs:
         return ce, False
     osh = next((x for x in shots if x["s"] <= obs < x["e"]), None)
