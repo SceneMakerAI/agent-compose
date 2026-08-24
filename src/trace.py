@@ -63,7 +63,7 @@ class Trace:
         })
 
     def finish(self, comp_id: int | None, status: str, **fields: Any) -> None:
-        """파일로 떨군다. 이름은 comp_id 기준 — 편성 결과와 1:1 로 짝지어야 대조가 된다."""
+        """파일로 떨군다. 이름은 {v_id}-{comp_id} — 영상별로 묶여 보이고 편성과 1:1 이다."""
         if not self.on:
             return
         self._data.update(
@@ -71,7 +71,8 @@ class Trace:
             elapsed=round(time.monotonic() - self._t0, 1), **fields)
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
-            stem = f"comp{comp_id}" if comp_id else f"v{self._data['v_id']}-failed"
+            v_id = self._data["v_id"]
+            stem = f"{v_id}-{comp_id}" if comp_id else f"{v_id}-failed"
             path = self._dir / f"{stem}.json"
             path.write_text(
                 json.dumps(self._data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -113,7 +114,7 @@ def render_md(d: dict[str, Any]) -> str:
         스크롤로 타임라인을 못 찾는다).
     """
     v_id, comp_id = d.get("v_id"), d.get("comp_id")
-    out = [f"# comp{comp_id} · v{v_id} — {d.get('query', '')}", ""]
+    out = [f"# v{v_id} · comp{comp_id} — {d.get('query', '')}", ""]
     out += [(f"- 결과: **{d.get('status')}** · 클립 {d.get('clips', '?')}건 "
              f"· {d.get('total', '?')}초 · 총 {_dur(d.get('elapsed'))}"),
             f"- LLM {len(d.get('llm', []))}콜 / 노드 {len(d.get('nodes', []))}개", ""]
