@@ -203,6 +203,21 @@ def _span(clip: dict, segs: list[dict]) -> list[dict]:
     return out
 
 
+def _result_end(obs: float | None, scene_e: float) -> float:
+    """끝 후보 창의 상한 — **결과 전광판까지**. 그 뒤는 이 플레이가 아니다.
+
+    2026-08-24. 상한이 장면 끝이던 동안 후보가 결과와 무관한 자리까지 뻗었다 — 실측
+    (v1004 장면1 삼진): 결과 전광판이 00:14:32 인데 후보는 00:15:00·00:15:16 두 개뿐이고,
+    그 해설은 이미 투수 부상 이력과 다음 타자 이야기다. 결과에서 끊어야 하는데 고를
+    자리가 없었다.
+
+    obs 는 cut.obs_floor — 전이 원장이 보증하는 결과 관측이 든 **샷의 끝**이라 이미
+    세그먼트 경계에 맞아 있다(화면을 반쯤 자르지 않는다). 원장에 관측이 없는 장면은
+    장면 끝을 그대로 쓴다 — 자를 근거가 없는데 좁히면 이 노드가 다시 침묵한다.
+    """
+    return scene_e if obs is None else obs
+
+
 def _pitch_idx(span: list[dict], pitch: float | None) -> int | None:
     """투구 화면인 세그먼트의 인덱스 — 경계 부스러기면 다음으로 스냅.
 
@@ -220,7 +235,7 @@ def _pitch_idx(span: list[dict], pitch: float | None) -> int | None:
     return i
 
 
-def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float,
+def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float, hi: float,
                obs: float | None, ce: float) -> tuple[list[dict], list[dict]]:
     """세그먼트 골격 → (줄 목록, 후보 목록). 번호는 줄과 후보가 같은 순서로 공유한다.
 
@@ -256,9 +271,17 @@ def _end_lines(span: list[dict], utts: list, *, pi: int | None, lo: float,
         line = {"kind": "cur" if is_cur else "seg", "at": x["s"],
                 "shot_type": x["shot_type"], "shot": x["shot"], "marks": marks,
                 "utts": [t for _us, _ue, t in said]}
-        # 자를 수 있는 자리 = 투구 이후 · 광고 아님 · 지금 자리 아님 · 변별 재료 있음
-        if (not is_cur and x["s"] > lo and x["shot_type"] not in SKIP_SHOT_TYPES
-                and (x["shot"] or said) and abs(x["e"] - ce) >= 1):
+        # 자를 수 있는 자리 = 투구 이후 · 결과 해설이 끝나기 전 · 광고 아님 · 지금 자리 아님.
+        # **변별 재료(캡션·해설) 유무는 안 따진다** — 창이 [투구, 결과 해설 끝]으로
+        # 좁아져 후보가 몇 개 안 되고, 결과 직후의 무캡션 세그먼트가 정작 끊어야 할
+        # 자리인 경우가 많다(v1004 장면1: 결과 직후 두 컷이 캡션 없어 접히는 바람에
+        # 후보가 18초·48초 뒤 두 개뿐이었다).
+        # 비교 대상은 세그먼트의 **끝**이다 — 고르는 게 끝이고 lo 는 "클립이 이보다
+        # 짧으면 안 된다"는 하한이라 끝에 걸어야 한다. 시작으로 걸면 결과 자리를
+        # 통째로 놓친다 (v1003 장면1: 정답인 리액션 샷 끝 882.7 이 시작 872.8 < lo 876
+        # 때문에 탈락해 후보가 0이 됐다).
+        if (not is_cur and lo < x["e"] <= hi
+                and x["shot_type"] not in SKIP_SHOT_TYPES and abs(x["e"] - ce) >= 1):
             ends.append({"sec": x["e"], "at": x["s"], "shot_type": x["shot_type"],
                          "shot": x["shot"]})
             line["num"] = len(ends)
@@ -311,8 +334,9 @@ def end_rows(clips: list[dict], segs: list[dict], utts: list) -> list[dict]:
         # 스윙만 남고 결과가 통째로 사라진다.
         lo = max(cs + MIN_CLIP_SEC, span[pi]["s"] if pi is not None else cs)
         obs = cut.obs_floor(c, segs)
+        hi = _result_end(obs, c["e"])
 
-        lines, ends = _end_lines(span, utts, pi=pi, lo=lo, obs=obs, ce=ce)
+        lines, ends = _end_lines(span, utts, pi=pi, lo=lo, hi=hi, obs=obs, ce=ce)
 
         if not ends:
             continue
