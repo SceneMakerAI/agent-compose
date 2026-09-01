@@ -1,3 +1,9 @@
+# LangGraph flow 정의부.
+# 노드 순서:
+# rephrase_query → retrieve_evidence → select_clips
+# → refine_end_bound → refine_start_bound → finish
+# 노드명은 잡 폴링 응답의 progress 배열에 그대로 실려 나가므로,
+# 이름을 바꾸면 UI 진행표시 매핑도 함께 갱신해야 한다.
 """compose 그래프 — 질의 1건 → 편성.
 
   rephrase_query ─► retrieve_evidence ─► select_clips
