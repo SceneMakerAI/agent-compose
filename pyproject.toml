@@ -1,34 +1,28 @@
 [project]
 name = "agent-compose"
 version = "0.1.0"
-description = "SceneMaker 질의 기반 하이라이트 편성 API (poc-search-bench4 서비스 승격)"
-requires-python = ">=3.12"
+description = "SceneMaker 질의 기반 하이라이트 편성 API (agent-compose 구조 리팩토링)"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115",
-    "uvicorn[standard]>=0.30",
-    "pydantic-settings>=2.4",
-    "asyncmy>=0.2.9",
-    "httpx>=0.27",
-    "pymilvus>=2.6",
-    "openai>=1.40",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "asyncmy>=0.2.11",
     "langgraph>=0.2",
-    "python-dotenv>=1.0",
+    "pymilvus>=2.5",
+    "httpx>=0.28",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9",
+]
+
+# [build-system] 의도적 생략 — src/ 가 import 루트(PYTHONPATH=src)인 비패키지 앱.
 
 [tool.uv]
 package = false
 
-[dependency-groups]
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "ruff>=0.6",
-]
-
 [tool.ruff]
 line-length = 100
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-pythonpath = ["src"]
-testpaths = ["tests"]

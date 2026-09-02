@@ -3,13 +3,12 @@
 # (worker-prep-vision deploy/update.sh 계승 — sudo 이원화만 다름: 이 서비스는
 #  agent 계정 소유라 git/uv 는 sudo -u agent, systemctl 은 sudo 로 돈다)
 #
-# 사용(sm-api-01, ec2-user 등 sudo 가능 계정에서):
+# 사용(sudo 가능 계정에서):
 #   deploy/update.sh            # 변경 없으면 아무것도 안 하고 종료
 #   deploy/update.sh --force    # 변경 없어도 sync + 재기동 강제
 #
 # 전제:
 #   - 배포 디렉토리가 GitHub 를 origin(ssh 별칭 + read-only deploy key) 으로 둔 git clone, 소유자 agent
-#     (최초 1회 부트스트랩은 CLAUDE.md 참조)
 #   - .env 는 gitignore(미추적)라 reset --hard 에도 보존된다
 set -euo pipefail
 
@@ -49,11 +48,10 @@ fi
 sudo systemctl restart "$SERVICE"
 
 # 헬스 확인 — readyz(DB+embed+Milvus)까지 최대 30초 대기
-# .env 는 소유자 전용(agent:agent 600)이라 실행 계정(ec2-user)으로는 못 읽는다 —
-# 소유자로 읽는다. 실측 2026-08-24(sm-pub-01): 이 줄이 Permission denied 로 죽어
-# set -e 가 스크립트를 끊었다. 재기동은 이미 끝난 뒤라 서비스는 정상인데 배포는
-# 실패로 보이는, 가장 헷갈리는 실패 방식이었다.
-# 실패해도 배포 전체를 죽이지 않는다(|| true) — 포트는 기본값으로 확인하면 된다.
+# .env 는 소유자 전용(agent:agent 600)이라 실행 계정으로는 못 읽는다 — 소유자로 읽는다.
+# 이 줄이 Permission denied 로 죽으면 set -e 가 스크립트를 끊는다. 재기동은 이미 끝난
+# 뒤라 서비스는 정상인데 배포만 실패로 보이는, 가장 헷갈리는 실패 방식이 된다.
+# 그래서 실패해도 배포 전체를 죽이지 않는다(|| true) — 포트는 기본값으로 확인하면 된다.
 # ${PORT:-8084} 만으로는 부족하다: pipefail 이라 grep 실패가 대입 자체를 실패시켜
 # 폴백에 닿지 못한다.
 PORT=$(as_owner grep -E '^APP_PORT=' "$APP_DIR/.env" 2>/dev/null | cut -d= -f2 | awk '{print $1}' || true)

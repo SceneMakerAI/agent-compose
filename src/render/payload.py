@@ -1,17 +1,20 @@
 """worker-render 요청 변환 — t_compose_clip 행 → 렌더 페이로드 (순수 함수, 네트워크 무관).
 
-worker-render 계약 (2026-08-18 스펙):
-- file_name: 원본 상대 경로 "{v_id}/source.mp4" — 워커의 vod 루트 기준. worker-prep-stt
-  가 항상 /mnt/nvme/vod/{v_id}/source.mp4 로 만든다 (v_id 접두 필수 — 실렌더 확인 2026-08-18).
-- innings: {"{이닝번호}_{top|bot}": [{start_sec, end_sec, start_hms, end_hms}, …]}.
-  렌더링은 sec 값만 사용, hms 는 디버깅 표기용.
-- bumper_yn: 이닝 그룹 사이 범퍼 삽입. 스펙 문서의 예제(bumper)와 표(bumper_yn)가
-  달라 예제를 따랐었는데, 워커 OpenAPI 실측 결과 **bumper_yn 이 정답**이고 워커 기본값은
-  false 다 (2026-08-19 확인 — 그 전까지 bumper 는 무시돼 범퍼 없이 렌더됐다).
-- sync_yn: True 면 완주 후 응답, False 면 즉시 accepted + GET /render/{v_id}/{c_id} 폴링.
+요청 본문 (POST /render/sports/baseball):
+    {
+      "v_id": 1006,
+      "c_id": 4,                        # 편성 id (comp_id)
+      "file_name": "1006/source.mp4",   # 워커 vod 루트 기준 상대 경로 (worker-prep-stt 산출)
+      "sync_yn": false,                 # 항상 false — 접수만 하고 GET /render/{v_id}/{c_id} 폴링
+      "bumper_yn": true,                # 이닝 그룹 사이 범퍼 — 워커 기본이 false 라 항상 명시
+      "innings": {                      # "{이닝번호}_{top|bot}" 키, 배열 순서 = 렌더 순서
+        "1_top": [{"start_sec": 903.0, "end_sec": 906.0,          # 렌더는 sec 만 사용
+                   "start_hms": "00:15:03.0", "end_hms": "00:15:06.0"}]  # hms 는 표기용
+      }
+    }
 
-inning 이 비거나 형식 밖인 클립은 ValueError — 상류 발행 데이터 결함 신호라서,
-조용히 빼고 렌더하면 편성과 결과물이 어긋난다 (사전 차단, 호출부가 4xx 로 변환).
+inning 이 비거나 형식 밖('-1' 미인식 포함)인 클립은 ValueError — 상류 발행 데이터
+결함 신호라서, 조용히 빼고 렌더하면 편성과 결과물이 어긋난다 (호출부가 422 로 변환).
 """
 
 import re
@@ -22,19 +25,22 @@ _INNING_RE = re.compile(r"(\d+)\s*회\s*(초|말)")
 
 
 def inning_key(inning: str) -> str:
-    """t_compose_clip.inning("3회 초") → worker-render 이닝 키("3_top").
-
+    """
+    Summary:
+        클립 이닝("6회초") → worker-render 이닝 키("6_top").
     Args:
-        inning (str): "N회 초|말" 형식 (공백 유무 무관, 연장 이닝 포함).
+        inning (str): "N회초|말" 형식 (공백 유무 무관, 연장 이닝 포함).
     Returns:
         str: "{N}_top" 또는 "{N}_bot".
     Raises:
-        ValueError: 형식 밖(빈 문자열 포함) — 발행 데이터 결함.
+        ValueError: 형식 밖(빈 문자열·'-1' 미인식 포함) — 발행 데이터 결함.
     """
     m = _INNING_RE.match((inning or "").strip())
     if not m:
         raise ValueError(f"이닝 형식 밖: {inning!r}")
-    return f"{m.group(1)}_{'top' if m.group(2) == '초' else 'bot'}"
+    if m.group(2) == "초":
+        return f"{m.group(1)}_top"
+    return f"{m.group(1)}_bot"
 
 
 def sec_to_hms(sec: float) -> str:
@@ -44,46 +50,52 @@ def sec_to_hms(sec: float) -> str:
     return f"{int(h):02d}:{int(m):02d}:{rem:04.1f}"
 
 
-def build_request(v_id: int, c_id: int, clips: list[dict], bumper: bool,
-                  sync: bool = False) -> dict:
+def build_request(v_id: int, comp_id: int, clips: list[dict], bumper: bool) -> dict:
     """
     Summary:
         편성 클립들 → POST /render/sports/baseball 요청 본문.
     Args:
         v_id (int): 영상 id.
-        c_id (int): 편성 id (comp_id — 결과 파일 c_{c_id}.mp4 로 추적).
-        clips (list[dict]): t_compose_clip 행 (scene_id·inning·start·end, 시간순 전제).
+        comp_id (int): 편성 id — 워커의 c_id (결과 파일 추적 키).
+        clips (list[dict]): t_compose_clip 행 (scene_no·inning·start_sec·end_sec,
+            시간순 전제 — 이닝 그룹·그룹 내 순서가 입력 순서로 유지된다).
         bumper (bool): 이닝 그룹 사이 범퍼 삽입 여부.
-        sync (bool): True 면 워커가 완주까지 잡아둔다 (원샷 전용 — 단독 렌더는 False).
     Returns:
-        dict: worker-render 요청 본문.
+        dict: worker-render 요청 본문 (sync_yn=False 고정).
     Raises:
-        ValueError: 클립 0건, 또는 이닝 없는/형식 밖 클립 존재 (scene_id 나열).
+        ValueError: 클립 0건, 또는 이닝 형식 밖 클립 존재 (scene_no 나열).
     """
     if not clips:
         raise ValueError("클립 0건 — 렌더 대상 없음")
-    bad = []
-    for c in clips:
+
+    # 이닝 검사를 먼저 전 건 수행 — 결함 클립을 한 번에 전부 드러낸다
+    bad_scene_nos = []
+    for clip in clips:
         try:
-            inning_key(c.get("inning") or "")
+            inning_key(clip.get("inning") or "")
         except ValueError:
-            bad.append(c["scene_id"])
-    if bad:
-        raise ValueError(f"이닝 없는 클립 scene_id={bad} — 발행 데이터 확인 필요 (렌더 중단)")
+            bad_scene_nos.append(clip["scene_no"])
+    if bad_scene_nos:
+        raise ValueError(
+            f"이닝 없는 클립 scene_no={bad_scene_nos} — 발행 데이터 확인 필요 (렌더 중단)")
 
     innings: dict[str, list[dict]] = {}
-    for c in clips:                       # 시간순 입력이라 이닝 그룹·그룹 내 순서 자연 유지
-        innings.setdefault(inning_key(c["inning"]), []).append({
-            "start_sec": float(c["start"]),
-            "end_sec": float(c["end"]),
-            "start_hms": sec_to_hms(c["start"]),
-            "end_hms": sec_to_hms(c["end"]),
+    for clip in clips:
+        key = inning_key(clip["inning"])
+        if key not in innings:
+            innings[key] = []
+        innings[key].append({
+            "start_sec": float(clip["start_sec"]),
+            "end_sec": float(clip["end_sec"]),
+            "start_hms": sec_to_hms(clip["start_sec"]),
+            "end_hms": sec_to_hms(clip["end_sec"]),
         })
+
     return {
         "v_id": v_id,
-        "c_id": c_id,
+        "c_id": comp_id,
         "file_name": f"{v_id}/{SOURCE_FILE_NAME}",
-        "sync_yn": sync,
+        "sync_yn": False,
         "bumper_yn": bumper,
         "innings": innings,
     }

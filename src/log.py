@@ -1,7 +1,6 @@
 """
-로깅 설정과 헬퍼 — agent-vision src/log.py 관례 계승 (RotatingFileHandler 10MB×5).
+로깅 설정과 헬퍼 — RotatingFileHandler 10MB×5, v_id 컨텍스트 태깅.
 
-agent-vision3 추가분: v_id 컨텍스트 태깅.
 서비스는 여러 v_id 분석 플로우를 동시에 돌리므로(BackgroundTasks),
 플로우 엔진이 bind_v_id()로 묶어 두면 그 코루틴 안의 모든 로그 줄에
 [v123] 프리픽스가 자동으로 붙는다. contextvars 기반이라 asyncio 태스크 간에 섞이지 않는다.
