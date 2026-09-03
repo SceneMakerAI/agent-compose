@@ -42,7 +42,6 @@ class ComposeRequest(BaseModel):
     # 예산은 마감 단계의 **덜어내기 전용**이다: 예산을 채우려고 선곡에 없던 장면을
     # 끌어오는 통로는 열지 않는다 (질의를 규칙이 덮어쓰게 된다 — 설계 결정).
     budget_sec: int | None = None
-    bumper: bool = True          # 렌더 시 이닝 그룹 사이 범퍼 — 편성 헤더(bumper_yn)에 저장
 
 
 @router.post("/compose", status_code=status.HTTP_202_ACCEPTED)
@@ -64,7 +63,7 @@ async def post_compose(req: ComposeRequest, request: Request,
         raise UnsupportedCategoryError(v_id=req.v_id, cate_id=video.cate_id)
 
     comp_id = await ComposeRepo(request.app.state.db).create(
-        req.v_id, req.query, req.budget_sec, req.bumper)
+        req.v_id, req.query, req.budget_sec)
 
     _jobs.create((req.v_id, comp_id),
                  v_id=req.v_id, comp_id=comp_id, query=req.query, progress=[])

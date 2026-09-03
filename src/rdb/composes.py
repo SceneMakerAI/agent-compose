@@ -48,8 +48,7 @@ class ComposeRepo:
         """Database(커넥션 풀 래퍼)를 주입받는다."""
         self._db = db
 
-    async def create(self, v_id: int, query: str, budget_sec: int | None,
-                     bumper: bool) -> int:
+    async def create(self, v_id: int, query: str, budget_sec: int | None) -> int:
         """
         Summary:
             편성 헤더 선-INSERT — comp_id 를 발급해 반환한다 (status=PLAN).
@@ -57,7 +56,6 @@ class ComposeRepo:
             v_id (int): 대상 영상 id.
             query (str): 사용자 질의 원문.
             budget_sec (int | None): 요청 목표 분량(초) — 미지정이면 NULL.
-            bumper (bool): 렌더 시 이닝 그룹 사이 범퍼 삽입 여부 (Y/N 으로 저장).
         Returns:
             int: 발급된 comp_id (v_id 안에서 1부터).
         Description:
@@ -75,10 +73,9 @@ class ComposeRepo:
 
                 await cur.execute(
                     "INSERT INTO t_compose (v_id, comp_id, query, budget_sec, "
-                    "  status_code, bumper_yn) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (v_id, comp_id, query, budget_sec,
-                     int(ComposeStatus.PLAN), "Y" if bumper else "N"))
+                    "  status_code) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (v_id, comp_id, query, budget_sec, int(ComposeStatus.PLAN)))
             await conn.commit()
         log.info("t_compose 접수: v_id=%s comp_id=%s %r", v_id, comp_id, query)
         return comp_id
