@@ -71,6 +71,12 @@ SYSTEM = """\
     떨어뜨리는 추상적 메타 단어는 절대 포함하지 않습니다.
   - '없음'은 위를 다 적용해도 남는 구체 단어가 없을 때만 씁니다 (예: "하이라이트 모음").
   - 선택지 제약이 없으며, 여러 개는 | 로 구분합니다.
+- 분량: 질의가 완성본 **전체 길이**를 숫자로 지정했을 때만 그 값을 **초 단위 정수**로
+  적습니다 (예: "5분짜리로" → 300, "3분 이내" → 180, "90초" → 90).
+  - '짧게'·'핵심만'·'풀버전'처럼 숫자 없는 표현은 분량이 아닙니다 → '없음'.
+    (그 취향은 다른 단계가 클립 하나하나의 길이로 반영합니다)
+  - 한 장면의 길이가 아니라 편성 전체의 목표 길이입니다.
+  - 지정이 없으면 '없음'.
 
 [선택 원칙]
 1. 각 축은 [선택지]에 제시된 값 중에서만 고릅니다. 목록에 없는 값은 절대 지어내지
@@ -87,13 +93,14 @@ SYSTEM = """\
 6. 수비 장면을 묻는 질의: 라벨은 아웃을 만드는 플레이(땅볼 아웃·플라이 아웃·태그 아웃·
    병살·삼진 등)를 고르고, 안타는 수비 실패이므로 고르지 않습니다.
 
-[출력 형식 — 아래 6줄만 출력]
+[출력 형식 — 아래 7줄만 출력]
 이닝: ...
 팀명: ...
 관점: 공격|수비|없음
 라벨: ...
 전광판: ...
-검색어: ...\
+검색어: ...
+분량: 초 단위 정수|없음\
 """
 
 
@@ -166,7 +173,42 @@ def empty_spec() -> dict:
         "labels": [],
         "board_tags": [],
         "phrases": [],      # 키워드 검색어 — 비면 벡터 검색 생략
+        "budget_sec": None,  # 질의가 지정한 목표 분량(초) — None 이면 분량 언급 없음.
+                             # 실제 채택은 trim_budget 이 정한다 (API 파라미터가 우선)
     }
+
+
+# 분량 판독 가드 — 이 범위 밖은 오독으로 보고 버린다. 잘못 읽은 값으로 편성을
+# 잘라내는 쪽이, 분량 지정을 무시하는 쪽보다 나쁘다.
+BUDGET_MIN_SEC = 10
+BUDGET_MAX_SEC = 3 * 60 * 60
+
+
+def parse_budget(body: str) -> int | None:
+    """
+    Summary:
+        분량 줄 → 목표 분량(초). 판독 불가·범위 밖이면 None (절단 안 함).
+    Args:
+        body (str): 분량 줄의 값 부분 (예: "300", "5분", "없음").
+    Returns:
+        int | None: 초 단위 정수. 해석 불가면 None.
+    Description:
+        - 프롬프트는 초 단위 정수를 요구하지만, 모델이 단위를 붙여 답하는 경우가
+          흔해 "분"·"시간" 표기를 환산한다 ("초"가 함께 있으면 그대로 초로 읽는다).
+    """
+    digits = "".join(ch for ch in body if ch.isdigit())
+    if not digits:
+        return None
+    sec = int(digits)
+    if "초" not in body:
+        if "시간" in body:
+            sec *= 3600
+        elif "분" in body:
+            sec *= 60
+    if BUDGET_MIN_SEC <= sec <= BUDGET_MAX_SEC:
+        return sec
+    log.warning("parse_query 분량 범위 밖 — 무시: %r", body)
+    return None
 
 
 def parse(text: str, vocab: dict) -> dict:
@@ -177,10 +219,12 @@ def parse(text: str, vocab: dict) -> dict:
         text (str): LLM 응답 본문.
         vocab (dict): meta_vocab 결과 — 검산 기준 (이 안의 값만 통과).
     Returns:
-        dict: {innings, teams, labels, board_tags, phrases: list[str], view: str}.
-            빈 목록 = 그 축 필터 안 함. teams 는 질의가 언급한 팀(사실)이고
-            view(공격|수비|무지정)와 조합해 apply_spec 이 공격/수비 구간을 계산한다.
+        dict: {innings, teams, labels, board_tags, phrases: list[str], view: str,
+            budget_sec: int | None}. 빈 목록 = 그 축 필터 안 함. teams 는 질의가
+            언급한 팀(사실)이고 view(공격|수비|무지정)와 조합해 apply_spec 이
+            공격/수비 구간을 계산한다.
             phrases 는 벡터 검색용 키워드 (자유 — 어휘 검산 없음).
+            budget_sec 은 질의가 지정한 목표 분량 — 없으면 None.
     """
     spec = empty_spec()
 
@@ -216,6 +260,11 @@ def parse(text: str, vocab: dict) -> dict:
                 if phrase and phrase != "없음":
                     phrases.append(phrase)
             spec["phrases"] = phrases[:PHRASES_MAX]
+            continue
+
+        # 분량 — 자유 숫자라 어휘 검산 없음. 판독 실패는 None(절단 안 함)으로 흘린다
+        if axis == "분량":
+            spec["budget_sec"] = parse_budget(body)
             continue
 
         if axis not in axes:

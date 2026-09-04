@@ -17,14 +17,17 @@ class ComposeState(TypedDict, total=False):
     # --- 입력 ---
     v_id: int
     query: str               # 사용자 질의 원문
-    budget_sec: int | None   # 목표 분량(초) — 마감 단계 덜어내기 전용
+    budget_sec: int | None   # 목표 분량(초) — 마감 단계 덜어내기 전용.
+                             # API 파라미터 값. 없으면 trim_budget 이 질의에서 읽은
+                             # spec["budget_sec"] 로 폴백한다 (파라미터가 우선)
     trace: object            # InferTraceLog | None — LLM 콜 기록기 (직렬화 대상 아님)
 
     # --- 노드 산출 (그래프 확장 시 키 추가) ---
     scenes: list[Scene]      # load_inventory — 인벤토리 불변 스냅샷 (scene_no 순)
     spec: dict               # parse_query — 필터 스펙. innings·teams(+view 관점) 는
                              # 좁히는 축(AND), labels·board_tags 는 넓게 모으는 축(OR 합침).
-                             # phrases 는 벡터 검색어. 빈 목록 = 그 축 필터 안 함
+                             # phrases 는 벡터 검색어. 빈 목록 = 그 축 필터 안 함.
+                             # budget_sec 은 질의가 지정한 목표 분량(초) — 없으면 None
     evidence: list[dict]     # retrieve_evidence — 구간 귀속 검색 결과
                              # [{scene_no, hits, sim, by_kind, snippets}] (히트수→유사도 순)
     evidence_orphan: int     # 어느 구간에도 안 겹친 히트 수 (색인 누락 의심 신호)

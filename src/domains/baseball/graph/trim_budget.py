@@ -1,5 +1,9 @@
 """trim_budget 노드 — 목표 분량(budget_sec)에 맞춰 클립을 덜어낸다 (순수 계산, LLM 무관).
 
+목표 분량의 출처는 둘이다: API 파라미터(요청)와 질의 문구("5분짜리로" — parse_query 가
+읽어 spec 에 담는다). **API 파라미터가 우선**이다 — 호출자가 명시한 값이 질의 문구에
+덮이면, UI 가 지정한 분량이 사용자가 흘려 쓴 표현에 밀린다. 둘 다 없으면 절단하지 않는다.
+
 **덜어내기만 한다.** 모자라도 채우지 않는다 — 예산을 채우려고 선곡에 없던 구간을
 끌어오는 통로는 열지 않는다 (질의를 규칙이 덮어쓰게 되는 자리 — 설계 결정).
 
@@ -19,9 +23,14 @@ def make_node(budget_margin: float):
     """팩토리 — 순수 계산이라 자원이 없다. budget_margin 은 예산 여유율 (설정)."""
 
     async def trim_budget(st: ComposeState) -> dict:
-        """rank 순으로 담다가 허용 상한 초과분을 버린다 — budget_sec 없으면 통과."""
+        """rank 순으로 담다가 허용 상한 초과분을 버린다 — 목표 분량 없으면 통과."""
         clips = st.get("clips") or []
+        # API 파라미터 우선, 없을 때만 질의에서 읽은 분량으로 폴백
         budget = st.get("budget_sec")
+        source = "요청"
+        if not budget:
+            budget = (st.get("spec") or {}).get("budget_sec")
+            source = "질의"
         trace = st.get("trace")
 
         if not budget or not clips:
@@ -45,10 +54,12 @@ def make_node(budget_margin: float):
         # 확정은 시간순 — 재생은 경기 흐름대로
         kept.sort(key=lambda c: c["start"])
 
-        log.info("trim_budget: 예산 %ds(상한 %ds) — %d건 %ds 유지, %d건 버림 %s",
-                 budget, cap, len(kept), used, len(dropped), dropped or "")
+        log.info("trim_budget: 예산 %ds[%s](상한 %ds) — %d건 %ds 유지, %d건 버림 %s",
+                 budget, source, cap, len(kept), used, len(dropped), dropped or "")
         if trace is not None:
-            lines = [f"- 예산 {budget}s (허용 상한 {cap}s) → 유지 {len(kept)}건 {used}s"]
+            head = (f"- 예산 {budget}s ({source} 지정 · 허용 상한 {cap}s) "
+                    f"→ 유지 {len(kept)}건 {used}s")
+            lines = [head]
             for clip in kept:
                 lines.append(f"  * scene {clip['scene_no']} rank={clip['rank']} {clip['sec']}s")
             if dropped:
