@@ -41,8 +41,11 @@ SYSTEM = """\
    [★해설]·[★화면]·[★자막]처럼 ★ 이 붙은 줄은 사용자 질의와의 벡터 유사도 검색에
    걸린 내용입니다 — 판단의 우선 근거로 삼되, ★ 이 없어도 내용이 질의에 맞으면
    남길 수 있습니다.
-5. 보드 사실(라벨·전광판·점수)과 클립 내용이 충돌하면 보드 사실을 우선합니다.
-6. 출력은 남긴 구간을 **중요도 내림차순**으로 나열합니다 — 질의 부합도가 높고
+5. 보드 사실(라벨·전광판·점수·판세)과 클립 내용이 충돌하면 보드 사실을 우선합니다.
+6. **판세**는 그 구간의 득점이 경기 판도를 바꾼 결과입니다 — 선취점·동점·역전·추격·리드확대.
+   득점이 없는 구간에는 판세 줄이 아예 없습니다. "동점"은 점수가 **같아진 순간**만
+   가리킵니다 — 0:0 인 채 아직 아무도 득점하지 않은 구간은 동점이 아닙니다.
+7. 출력은 남긴 구간을 **중요도 내림차순**으로 나열합니다 — 질의 부합도가 높고
    하이라이트 가치(득점·승부를 가른 플레이·결정적 수비)가 큰 순서입니다.
    분량은 신경 쓰지 않습니다 — 최종 분량은 이후 단계가 이 순서를 근거로 맞춥니다.
 
@@ -58,6 +61,41 @@ def batting_team_of(scene: Scene) -> str | None:
     if scene.inning.endswith("말"):
         return scene.home_team
     return None
+
+
+def score_state(scene: Scene) -> str:
+    """
+    Summary:
+        구간의 득점이 만든 판세를 한 단어로 — 득점 없는 구간은 빈 문자열.
+    Returns:
+        str: 선취점 | 동점 | 역전 | 추격 | 리드확대. 이닝 미인식이면 "" (판정 불가).
+    Description:
+        - 득점 전 점수는 종료 점수에서 공격팀 득점을 뺀 값이다. 공격팀 판별은
+          batting_team_of 와 같은 규칙(초=원정·말=홈)이되, 팀명 문자열 비교 대신
+          이닝으로 직접 가른다 (동명 팀 가정에 기대지 않는다).
+        - **"동점"은 점수가 같아진 순간만 가리킨다.** 0:0 인 채 아무도 득점하지 않은
+          구간은 동점이 아니다 — 질의 "동점 장면"이 경기 초반 0:0 구간을 통째로
+          끌어오던 원인이 이 구분의 부재였다.
+    """
+    if scene.diff_score <= 0:
+        return ""
+    if scene.inning.endswith("초"):
+        mine, theirs = scene.score_away, scene.score_home
+    elif scene.inning.endswith("말"):
+        mine, theirs = scene.score_home, scene.score_away
+    else:
+        return ""                       # 누가 득점했는지 몰라 판세를 계산할 수 없다
+
+    before = mine - scene.diff_score    # 이 구간 득점 직전, 공격팀 점수
+    if before == 0 and theirs == 0:
+        return "선취점"
+    if mine == theirs:
+        return "동점"
+    if before < theirs and mine > theirs:
+        return "역전"
+    if mine < theirs:
+        return "추격"                   # 따라붙었지만 아직 뒤진다
+    return "리드확대"
 
 
 def apply_spec(scenes: list[Scene], spec: dict) -> list[Scene]:
@@ -180,11 +218,16 @@ def render_inventory(candidates: list[Scene], contents: dict[int, dict]) -> str:
             lines.append(f"- 라벨: {','.join(scene.labels)}")
         if scene.tags:
             lines.append(f"- 전광판: {','.join(scene.tags)}")
-        # 점수는 구간 종료 시점 (원정:홈). 이 구간에서 득점이 났으면 +N 을 붙인다.
-        score = f"- 점수: {scene.score_away}:{scene.score_home}"
+        # 점수는 구간 종료 시점. 팀명을 붙여 좌우 관례를 몰라도 읽히게 한다 —
+        # "2:0" 만 찍던 때는 어느 팀 점수인지가 프롬프트에 드러나지 않았다.
+        score = (f"- 점수: {scene.away_team} {scene.score_away} : "
+                 f"{scene.home_team} {scene.score_home}")
         if scene.diff_score > 0:
             score += f" (이 구간 +{scene.diff_score})"
         lines.append(score)
+        state = score_state(scene)
+        if state:
+            lines.append(f"- 판세: {state}")
 
         entry = contents.get(scene.scene_no)
         if entry:
