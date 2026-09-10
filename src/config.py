@@ -47,13 +47,16 @@ class Settings(BaseSettings):
     llm_reasoning_effort: str | None = None
     # 선곡 콜 1건의 입력 토큰 상한 — 초과하면 맵-리듀스(청크 병렬 선곡 → 합집합) 분기.
     # 컨텍스트 한도(131k)가 아니라 선곡 품질(후보 많으면 중간을 놓친다)·속도 기준의 값.
-    select_tokens_max: int = 5000
+    select_tokens_max: int = 25000
 
     # --- 편성 마감(trim_budget) ---
     # 예산 여유율 — 허용 상한 = budget_sec × (1 + budget_margin). 예산에 딱 맞춰
     # 자르면 대체로 예산 '이하'에서 끝난다 — 목표 분량을 채우는 쪽이 편성 의도에
     # 가까워 살짝 넘기는 것을 허용한다 (예: 0.1 이면 300초 요청 → 330초까지).
     budget_margin: float = 0.1
+
+    # --- 결과 통보(callback_url) ---
+    callback_timeout: float = 10.0      # 전송 상한 — 실패해도 편성은 성공으로 끝난다
 
     # --- embedding (질의 임베딩 — openai 호환 /v1/embeddings) ---
     # 색인(agent-vision)과 **같은 서버·모델**이어야 한다 — 다르면 벡터 공간이 어긋나

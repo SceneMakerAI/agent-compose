@@ -41,6 +41,24 @@ class ComposeStatus(IntEnum):
     ERROR_RENDER = 4950  # COMPOSE-ERROR-RENDER — 렌더 실패 (편성은 저장됨 — 재렌더 가능)
 
 
+# status_code → (code, result) — 조회·통보 응답의 상태 표현.
+_RESULT: dict[int, tuple[int, str]] = {
+    int(ComposeStatus.OK): (0, "OK"),
+    int(ComposeStatus.EMPTY): (0, "OK"),        # 정상 종결 — 조건 부합 장면이 없었다
+    int(ComposeStatus.PLAN): (0, "진행중"),
+    int(ComposeStatus.CUT): (0, "진행중"),
+    int(ComposeStatus.VERIFY): (0, "진행중"),
+    int(ComposeStatus.RENDER): (0, "진행중"),
+    int(ComposeStatus.ERROR): (-1, "fail"),
+    int(ComposeStatus.ERROR_RENDER): (-1, "fail"),
+}
+
+
+def result_of(status_code: int) -> tuple[int, str]:
+    """t_compose.status_code → (code, result). 미등록 코드는 실패로 본다."""
+    return _RESULT.get(int(status_code), (-1, "fail"))
+
+
 class ComposeRepo:
     """편성 결과 저장·조회 전담."""
 
@@ -48,16 +66,20 @@ class ComposeRepo:
         """Database(커넥션 풀 래퍼)를 주입받는다."""
         self._db = db
 
-    async def create(self, v_id: int, query: str, budget_sec: int | None) -> int:
+    async def create(self, v_id: int, query: str, budget_sec: int | None,
+                     stream_id: str = "VOD",
+                     callback_url: str | None = None) -> tuple[int, str]:
         """
         Summary:
-            편성 헤더 선-INSERT — comp_id 를 발급해 반환한다 (status=PLAN).
+            편성 헤더 선-INSERT — comp_id·search_id 를 발급해 반환한다 (status=PLAN).
         Args:
             v_id (int): 대상 영상 id.
             query (str): 사용자 질의 원문.
             budget_sec (int | None): 요청 목표 분량(초) — 미지정이면 NULL.
+            stream_id (str): 요청이 준 값 — 보관 전용 (편성 범위를 좁히지 않는다).
+            callback_url (str | None): 편성 완료 통보 URL — 미지정이면 NULL.
         Returns:
-            int: 발급된 comp_id (v_id 안에서 1부터).
+            tuple[int, str]: (comp_id, search_id). search_id 는 {요청일}-{v_id}-{comp_id}.
         Description:
             - 접수 시점에 행을 만들어 진행 국면이 status_code 로 드러나게 한다.
               클립·집계는 finish() 가 채운다.
@@ -71,14 +93,23 @@ class ComposeRepo:
                 (comp_id,) = await cur.fetchone()
                 comp_id = int(comp_id)      # 집계 결과는 Decimal 로 온다
 
+                # search_id 의 날짜는 DB 시계로 만든다 — reg_datetime 과 어긋나지 않게
                 await cur.execute(
-                    "INSERT INTO t_compose (v_id, comp_id, query, budget_sec, "
-                    "  status_code) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (v_id, comp_id, query, budget_sec, int(ComposeStatus.PLAN)))
+                    "INSERT INTO t_compose (v_id, comp_id, search_id, stream_id, query, "
+                    "  budget_sec, callback_url, status_code) "
+                    "VALUES (%s, %s, "
+                    "        CONCAT(DATE_FORMAT(NOW(), '%%Y%%m%%d'), '-', %s, '-', %s), "
+                    "        %s, %s, %s, %s, %s)",
+                    (v_id, comp_id, v_id, comp_id, stream_id, query, budget_sec,
+                     callback_url, int(ComposeStatus.PLAN)))
+                await cur.execute(
+                    "SELECT search_id FROM t_compose WHERE v_id = %s AND comp_id = %s",
+                    (v_id, comp_id))
+                (search_id,) = await cur.fetchone()
             await conn.commit()
-        log.info("t_compose 접수: v_id=%s comp_id=%s %r", v_id, comp_id, query)
-        return comp_id
+        log.info("t_compose 접수: v_id=%s comp_id=%s search_id=%s %r",
+                 v_id, comp_id, search_id, query)
+        return comp_id, search_id
 
     async def set_status(self, v_id: int, comp_id: int,
                          status: ComposeStatus) -> None:
@@ -155,6 +186,15 @@ class ComposeRepo:
             await conn.commit()
         log.info("t_compose 종결: v_id=%s comp_id=%s status=%s (%d클립, %ds)",
                  v_id, comp_id, status.name, len(clips), duration)
+
+    async def find_comp_id(self, v_id: int, search_id: str) -> int | None:
+        """search_id → comp_id. 없으면 None (호출부가 조회 실패로 변환)."""
+        async with self._db.acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT comp_id FROM t_compose WHERE v_id = %s AND search_id = %s",
+                (v_id, search_id))
+            row = await cur.fetchone()
+        return int(row[0]) if row else None
 
     async def fetch(self, v_id: int, comp_id: int) -> dict | None:
         """

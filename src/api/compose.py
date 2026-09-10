@@ -13,18 +13,15 @@
 import asyncio
 import time
 
-from fastapi import APIRouter, BackgroundTasks, Request, status
+from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
-from api.errors import (
-    ComposeNotFoundError,
-    UnsupportedCategoryError,
-    VideoNotFoundError,
-)
-from api.jobs import JobStore
+from api.errors import ComposeNotFoundError
+from api.jobs import JobStore, RunningGuard
+from domains.baseball import callback
 from log import bind_v_id, get_logger
 from pipeline import dispatch
-from rdb.composes import ComposeRepo, ComposeStatus
+from rdb.composes import ComposeRepo, ComposeStatus, result_of
 from rdb.videos import VideoRepo
 
 log = get_logger(__name__)
@@ -32,45 +29,71 @@ router = APIRouter(tags=["compose"])
 
 _jobs = JobStore()      # (v_id, comp_id) → 상태·결과 (프로세스 수명 캐시)
 
+# 편성은 한 번에 한 건만 받는다 — 슬롯이 하나뿐이라 키를 고정한다
+_SLOT = "compose"
+_guard = RunningGuard("compose")
+
 
 class ComposeRequest(BaseModel):
     """편성 요청."""
 
     v_id: int
     query: str
+    stream_id: str = "VOD"   # 보관 전용 — 편성 범위를 좁히지 않는다
     # 목표 분량(초). 없으면 절단하지 않는다 — 선곡이 곧 편성이다.
     # 예산은 마감 단계의 **덜어내기 전용**이다: 예산을 채우려고 선곡에 없던 장면을
     # 끌어오는 통로는 열지 않는다 (질의를 규칙이 덮어쓰게 된다 — 설계 결정).
     budget_sec: int | None = None
+    callback_url: str | None = None
 
 
-@router.post("/compose", status_code=status.HTTP_202_ACCEPTED)
+class ComposeAccepted(BaseModel):
+    """접수 응답 — 접수 가부를 code(0=성공)로 알린다. 실패면 search_id 가 없다."""
+
+    v_id: int
+    stream_id: str | None = None
+    search_id: str | None = None
+    code: int
+    result: str
+
+
+@router.post("/compose", response_model=ComposeAccepted,
+             response_model_exclude_none=True)
 async def post_compose(req: ComposeRequest, request: Request,
-                       background: BackgroundTasks) -> dict:
-    """편성 접수 — 202 {comp_id} 반환, 완료는 GET /compose?v_id=&comp_id= 로 폴링.
+                       background: BackgroundTasks) -> ComposeAccepted:
+    """편성 접수 — 완료는 GET /compose?v_id=&comp_id= 로 폴링.
 
-    접수 시점에 검증해 오류를 4xx 로 돌려준다 — 백그라운드에서 터지면 호출자가 모른다:
-    t_video 부재 404 / 미등록 카테고리 422.
-    접수와 동시에 t_compose 헤더를 선-INSERT 한다 (comp_id 즉시 발급, status=PLAN) —
-    진행 국면이 status_code 로 드러나고, 실패도 ERROR 행으로 남는다.
+    요청 형식이 맞으면 200 이고, 접수 가부는 본문 code 가 알린다 (0=성공 / -1=실패).
+    접수와 동시에 t_compose 헤더를 선-INSERT 한다 (comp_id·search_id 즉시 발급,
+    status=PLAN) — 진행 국면이 status_code 로 드러나고, 실패도 ERROR 행으로 남는다.
     """
     video = await VideoRepo(request.app.state.db).get(req.v_id)
     if video is None:
-        raise VideoNotFoundError(v_id=req.v_id)
+        return ComposeAccepted(v_id=req.v_id, code=-1, result="영상이 없습니다.")
 
     flow = dispatch.resolve(video.cate_id)
     if flow is None:
-        raise UnsupportedCategoryError(v_id=req.v_id, cate_id=video.cate_id)
+        return ComposeAccepted(v_id=req.v_id, code=-1,
+                               result=f"지원하지 않는 카테고리입니다. (cate_id={video.cate_id})")
 
-    comp_id = await ComposeRepo(request.app.state.db).create(
-        req.v_id, req.query, req.budget_sec)
+    if not _guard.try_acquire(_SLOT):
+        return ComposeAccepted(v_id=req.v_id, code=-1,
+                               result="편성이 진행 중입니다. 잠시 후 다시 요청해 주세요.")
+
+    try:
+        comp_id, search_id = await ComposeRepo(request.app.state.db).create(
+            req.v_id, req.query, req.budget_sec, req.stream_id, req.callback_url)
+    except Exception:
+        _guard.release(_SLOT)   # 백그라운드가 못 떴으니 여기서 놓는다
+        raise
 
     _jobs.create((req.v_id, comp_id),
                  v_id=req.v_id, comp_id=comp_id, query=req.query, progress=[])
-    background.add_task(_run, request, comp_id, flow, req)
-    log.info("편성 접수: v_id=%s comp_id=%s cate_id=%s(%s) %r",
-             req.v_id, comp_id, video.cate_id, flow.__module__, req.query)
-    return {"v_id": req.v_id, "comp_id": comp_id, "status": "running"}
+    background.add_task(_run, request, comp_id, search_id, flow, req)
+    log.info("편성 접수: v_id=%s comp_id=%s search_id=%s cate_id=%s(%s) %r",
+             req.v_id, comp_id, search_id, video.cate_id, flow.__module__, req.query)
+    return ComposeAccepted(v_id=req.v_id, stream_id=req.stream_id,
+                           search_id=search_id, code=0, result="OK")
 
 
 # 노드 완료 → 다음 국면 코드. 코드는 노드가 아니라 국면이라 전 노드를 다 적지 않는다
@@ -81,7 +104,7 @@ _PHASE_AFTER = {
 }
 
 
-async def _run(request: Request, comp_id: int, flow,
+async def _run(request: Request, comp_id: int, search_id: str, flow,
                req: ComposeRequest) -> None:
     """백그라운드 본체 — flow 실행 → 잡 갱신. 실패는 잡의 error 로 드러낸다.
 
@@ -109,7 +132,8 @@ async def _run(request: Request, comp_id: int, flow,
             # 종결 — 클립 저장 + 최종 코드 (empty 도 이력으로 남긴다)
             final = (ComposeStatus.EMPTY if state.get("status") == "empty"
                      else ComposeStatus.OK)
-            await repo.finish(req.v_id, comp_id, final, _clip_rows(state))
+            rows = _clip_rows(state)
+            await repo.finish(req.v_id, comp_id, final, rows)
 
         _jobs.replace(job_key, {
             "comp_id": comp_id,
@@ -128,6 +152,7 @@ async def _run(request: Request, comp_id: int, flow,
             "dropped": state.get("dropped"),
             "duration_sec": sum(c["sec"] for c in (state.get("clips") or [])),
         })
+        await _notify(req, search_id, 0, "OK", rows, st.settings)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -141,6 +166,19 @@ async def _run(request: Request, comp_id: int, flow,
             "progress": progress, "error": f"{type(e).__name__}: {e}",
             "elapsed_sec": round(time.monotonic() - started, 1),
         })
+        await _notify(req, search_id, -1, "fail", [], st.settings)
+    finally:
+        _guard.release(_SLOT)
+
+
+async def _notify(req: ComposeRequest, search_id: str, code: int, result: str,
+                  rows: list[dict], settings) -> None:
+    """callback_url 이 있을 때만 결과를 통보한다 (없으면 아무 것도 하지 않는다)."""
+    if not req.callback_url:
+        return
+    payload = callback.build(req.v_id, req.stream_id, search_id, req.query,
+                             code, result, rows)
+    await callback.send(req.callback_url, payload, settings.callback_timeout)
 
 
 def _clip_rows(state: dict) -> list[dict]:
@@ -168,12 +206,32 @@ def _clip_rows(state: dict) -> list[dict]:
 
 
 @router.get("/compose")
-async def get_compose(v_id: int, comp_id: int, request: Request) -> dict:
-    """편성 조회 — 인메모리 잡(진행·결과 상세) 우선, 없으면 저장분(t_compose).
+async def get_compose(v_id: int, search_id: str, request: Request) -> dict:
+    """편성 조회 — 본문은 통보(callback)와 같은 모양이다.
 
-    running 이면 progress(완료 노드 목록)가 진행 표시다. 프로세스 재시작으로 잡이
-    유실돼도 저장 행으로 폴백한다 — 그마저 없으면 404.
-    comp_id 는 v_id 안에서 1부터 발급되는 시퀀스라 v_id 없이는 특정할 수 없다.
+    상태는 t_compose.status_code 하나로 판정한다 — 인메모리 잡을 보지 않으므로
+    재기동해도 응답 모양이 바뀌지 않는다. 진행 중이면 scenes 가 빈 목록이다.
+    """
+    repo = ComposeRepo(request.app.state.db)
+    comp_id = await repo.find_comp_id(v_id, search_id)
+    row = await repo.fetch(v_id, comp_id) if comp_id is not None else None
+    if row is None:
+        return {"v_id": v_id, "search_id": search_id, "query": "", "result":
+                "편성을 찾을 수 없습니다.", "code": -1, "scenes": []}
+
+    code, result = result_of(row["status_code"])
+    clips = [{"stream_id": c["stream_id"], "start": c["start_stream_sec"],
+              "end": c["end_stream_sec"], "inning": c["inning"]}
+             for c in row["clips"]]
+    return callback.build(v_id, row["stream_id"], search_id, row["query"],
+                          code, result, clips)
+
+
+@router.get("/inter-compose")
+async def get_inter_compose(v_id: int, comp_id: int, request: Request) -> dict:
+    """편성 조회(테스트·디버깅용) — 인메모리 잡(진행·노드별 상세) 우선, 없으면 저장분.
+
+    연동 규격이 아니다 — 그래프 중간 산출(spec·evidence·picked 등)을 그대로 노출한다.
     """
     job = _jobs.get((v_id, comp_id))
     if job is not None:
