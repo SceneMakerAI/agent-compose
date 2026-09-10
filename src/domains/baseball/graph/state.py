@@ -38,10 +38,13 @@ class ComposeState(TypedDict, total=False):
     candidates: list[int]    # select_clips — 필터 통과 후보 scene_seq (관측용)
     picked: list[int]        # select_clips — 선곡 확정 scene_seq (**중요도 내림차순** —
                              # trim_budget 의 예산 덜어내기 근거. 시간순 아님)
-    clips: list[dict]        # select_end_point 좌표 확정 → trim_budget 이 예산 절단한 최종.
-                             # [{stream_id, scene_stream_seq, scene_seq, start, end, sec,
-                             #   start_whole, end_whole, rank, start_from, end_from}] 시간순.
+    clips: list[dict]        # select_end_point 좌표 확정 → merge_overlap 이 겹침 병합 →
+                             # trim_budget 이 예산 절단한 최종.
+                             # [{stream_id, scene_stream_seq, scene_seq, scene_seqs, start,
+                             #   end, sec, start_whole, end_whole, rank, start_from,
+                             #   end_from}] 시간순.
                              # start·end 는 청크 축(자를 좌표), *_whole 은 전체 영상 축(저장용)
                              # rank = 선곡 중요도 순위 (1이 가장 중요)
+                             # scene_seqs = 이 클립이 담은 구간들 — merge_overlap 이 붙인다
     dropped: list[str]       # trim_budget — 예산 절단으로 버린 클립 기록 (관측·응답용)
     status: str              # ok | empty

@@ -3,7 +3,7 @@
 그래프:
 
   load_inventory ─► parse_query ─► retrieve_evidence
-    ─► select_clips ─► select_end_point ─► trim_budget ─► END
+    ─► select_clips ─► select_end_point ─► merge_overlap ─► trim_budget ─► END
 """
 
 from langgraph.graph import END, START, StateGraph
@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from config import Settings
 from domains.baseball.graph import (
     load_inventory,
+    merge_overlap,
     parse_query,
     retrieve_evidence,
     select_clips,
@@ -46,6 +47,7 @@ def build_graph(db: Database, llm: ChatLLM, embedder: Embedder,
     g.add_node("select_clips", select_clips.make_node(llm, evidence_repo,
                                                       settings.select_tokens_max))
     g.add_node("select_end_point", select_end_point.make_node(llm, evidence_repo))
+    g.add_node("merge_overlap", merge_overlap.make_node())
     g.add_node("trim_budget", trim_budget.make_node(settings.budget_margin))
 
     g.add_edge(START, "load_inventory")
@@ -53,7 +55,8 @@ def build_graph(db: Database, llm: ChatLLM, embedder: Embedder,
     g.add_edge("parse_query", "retrieve_evidence")
     g.add_edge("retrieve_evidence", "select_clips")
     g.add_edge("select_clips", "select_end_point")
-    g.add_edge("select_end_point", "trim_budget")
+    g.add_edge("select_end_point", "merge_overlap")
+    g.add_edge("merge_overlap", "trim_budget")
     g.add_edge("trim_budget", END)
 
     return g.compile()

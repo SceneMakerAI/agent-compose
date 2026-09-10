@@ -181,26 +181,50 @@ async def _notify(req: ComposeRequest, search_id: str, code: int, result: str,
     await callback.send(req.callback_url, payload, settings.callback_timeout)
 
 
+def _union(lists) -> str:
+    """여러 목록 → 등장 순서를 지킨 합집합 콤마 문자열."""
+    out = []
+    for items in lists:
+        for item in items:
+            if item not in out:
+                out.append(item)
+    return ",".join(out)
+
+
 def _clip_rows(state: dict) -> list[dict]:
-    """최종 클립 → 저장 행. 태그·라벨·이닝은 인벤토리(Scene)에서 scene_seq 로 되찾는다."""
+    """최종 클립 → 저장 행. 태그·라벨·이닝은 인벤토리(Scene)에서 scene_seq 로 되찾는다.
+
+    병합 클립은 담은 구간 전부의 태그·라벨을 합치고, 흡수한 구간 번호를 merge_seqs 에 남긴다.
+    """
     by_no = {}
     for scene in state.get("scenes") or []:
         by_no[scene.scene_seq] = scene
 
     rows = []
     for clip in state.get("clips") or []:
-        scene = by_no.get(clip["scene_seq"])
+        seqs = clip.get("scene_seqs") or [clip["scene_seq"]]
+        scenes = []
+        for seq in seqs:
+            scene = by_no.get(seq)
+            if scene is not None:
+                scenes.append(scene)
+        absorbed = []
+        for seq in seqs[1:]:
+            scene = by_no.get(seq)
+            if scene is not None:
+                absorbed.append(str(scene.scene_stream_seq))
         rows.append({
             "stream_id": clip["stream_id"],
             "scene_stream_seq": clip["scene_stream_seq"],
             "scene_seq": clip["scene_seq"],
+            "merge_seqs": ",".join(absorbed) or None,
             "start": clip["start"],
             "end": clip["end"],
             "start_whole": clip["start_whole"],
             "end_whole": clip["end_whole"],
-            "tags": ",".join(scene.tags) if scene else "",
-            "labels": ",".join(scene.labels) if scene else "",
-            "inning": scene.inning if scene else "",
+            "tags": _union(s.tags for s in scenes),
+            "labels": _union(s.labels for s in scenes),
+            "inning": scenes[0].inning if scenes else "",
         })
     return rows
 

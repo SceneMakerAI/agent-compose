@@ -152,8 +152,8 @@ class ComposeRepo:
             v_id (int): 대상 영상 id.
             comp_id (int): create() 가 발급한 편성 id.
             status (ComposeStatus): OK | EMPTY. empty 편성도 이력으로 남긴다.
-            clips (list[dict]): {stream_id, scene_stream_seq, scene_seq, start, end,
-                start_whole, end_whole, tags, labels, inning} 시간순.
+            clips (list[dict]): {stream_id, scene_stream_seq, scene_seq, merge_seqs,
+                start, end, start_whole, end_whole, tags, labels, inning} 시간순.
                 start·end 는 청크 축, *_whole 은 전체 영상 축이다.
         """
         duration = 0
@@ -167,16 +167,16 @@ class ComposeRepo:
                     for seq, clip in enumerate(clips, 1):
                         rows.append((v_id, comp_id, seq,
                                      clip["stream_id"], clip["scene_stream_seq"],
-                                     clip["scene_seq"],
+                                     clip["scene_seq"], clip["merge_seqs"],
                                      clip["start"], clip["end"],
                                      clip["start_whole"], clip["end_whole"],
                                      clip["tags"], clip["labels"], clip["inning"]))
                     await cur.executemany(
                         "INSERT INTO t_compose_clip (v_id, comp_id, clip_seq, "
-                        "  stream_id, scene_stream_seq, scene_seq, "
+                        "  stream_id, scene_stream_seq, scene_seq, merge_seqs, "
                         "  start_stream_sec, end_stream_sec, start_sec, end_sec, "
                         "  tags, labels, inning) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         rows)
                 await cur.execute(
                     "UPDATE t_compose "
@@ -217,6 +217,7 @@ class ComposeRepo:
                 return None
             await cur.execute(
                 "SELECT clip_seq, stream_id, scene_stream_seq, scene_seq, "
+                "       merge_seqs, "
                 "       start_stream_sec, end_stream_sec, start_sec, end_sec, "
                 "       tags, labels, inning "
                 "FROM t_compose_clip WHERE v_id = %s AND comp_id = %s "
