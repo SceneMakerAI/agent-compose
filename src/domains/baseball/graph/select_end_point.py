@@ -44,53 +44,73 @@ SYSTEM = """\
 """
 
 
+def end_at(scene: Scene, i: int) -> tuple[int, int]:
+    """끝 후보 i 번째 → (청크 축, 전체 축). 두 목록은 상류에서 인덱스가 1:1 이다."""
+    whole = scene.end_idxs_whole[i] if i < len(scene.end_idxs_whole) else scene.end_whole
+    return scene.end_idxs[i], whole
+
+
 def clip_of(scene: Scene) -> dict:
     """
     Summary:
         구간 1건 → 기본 클립 좌표 (순수 계산 — LLM 선택 전의 기본값).
     Returns:
-        dict: {scene_no, start, end, sec, start_from, end_from}.
+        dict: {stream_id, scene_stream_seq, scene_seq, start, end, sec,
+            start_whole, end_whole, start_from, end_from}.
     Description:
         - 시작: pitch_idx 가 있으면 그 시각(투구부터), 없으면 구간 시작.
         - 끝: end_idxs 마지막 후보(여운 포함 완결 지점), 없으면 구간 끝.
         - 좌표가 뒤집히면(끝 ≤ 시작 — 상류 데이터 이상) 구간 통째로 폴백한다.
+        - 계산은 청크 축으로 하고, 고른 지점의 전체 영상 축 짝을 함께 담는다
+          (저장용 — 유도하지 않고 상류가 준 값을 그대로 꺼낸다).
     """
-    if scene.pitch_idx is not None:
-        start = scene.pitch_idx
+    if scene.pitch_idx is not None and scene.pitch_whole is not None:
+        start, start_whole = scene.pitch_idx, scene.pitch_whole
         start_from = "pitch_idx"
     else:
-        start = scene.start
+        start, start_whole = scene.start, scene.start_whole
         start_from = "구간 시작"
 
     if scene.end_idxs:
-        end = scene.end_idxs[-1]
+        end, end_whole = end_at(scene, len(scene.end_idxs) - 1)
         end_from = f"end_idxs 마지막({len(scene.end_idxs)}중)"
     else:
-        end = scene.end
+        end, end_whole = scene.end, scene.end_whole
         end_from = "구간 끝"
 
     # 좌표 역전 — 상류 데이터 이상 신호. 자르지 말고 구간 통째로 폴백한다.
     if end <= start:
         log.warning("select_end_point: scene %d 좌표 역전(%s~%s) — 구간 통째 폴백",
-                    scene.scene_no, start, end)
+                    scene.scene_seq, start, end)
         start, end = scene.start, scene.end
+        start_whole, end_whole = scene.start_whole, scene.end_whole
         start_from, end_from = "구간 시작(역전 폴백)", "구간 끝(역전 폴백)"
 
     return {
-        "scene_no": scene.scene_no,
+        "stream_id": scene.stream_id,
+        "scene_stream_seq": scene.scene_stream_seq,
+        "scene_seq": scene.scene_seq,
         "start": start,
         "end": end,
         "sec": end - start,
+        "start_whole": start_whole,
+        "end_whole": end_whole,
         "start_from": start_from,
         "end_from": end_from,
     }
 
 
-def content_lines(texts: list[dict], lo: float, hi: float) -> list[str]:
-    """[lo, hi] 와 겹치는 증거 원문 → 프롬프트 줄 (시간순, 같은 종류·내용은 1줄)."""
+def content_lines(texts: list[dict], stream_id: str, lo: float, hi: float) -> list[str]:
+    """[lo, hi] 와 겹치는 증거 원문 → 프롬프트 줄 (시간순, 같은 종류·내용은 1줄).
+
+    증거 시각은 청크 축이라 **같은 stream_id 끼리만** 겹침을 본다 — 다른 청크의
+    같은 초는 완전히 다른 시점이다 (select_clips 의 귀속 규칙과 같아야 한다).
+    """
     lines = []
     seen = set()
     for row in texts:
+        if row.get("stream_id") != stream_id:
+            continue
         if row["end_sec"] < lo or row["start_sec"] > hi:
             continue
         key = (row["kind"], row["text"])
@@ -109,14 +129,14 @@ def render_end_user(query: str, scene: Scene, clip: dict, texts: list[dict]) -> 
     후보 섹션에 섞으면 "그 후보를 골라야 보이는 내용"처럼 읽혀 판단을 흐린다.
     """
     parts = [f"[질의]\n{query}\n",
-             f"[클립 — 구간 {scene.scene_no}]",
+             f"[클립 — 구간 {scene.scene_seq}]",
              f"- 이닝: {scene.inning}",
              f"- 라벨: {','.join(scene.labels) or '-'} / 전광판: {','.join(scene.tags) or '-'}",
              f"- 시작: {clip['start']}s\n"]
 
     # 공통 내용 — 시작(투구)부터 첫 후보까지 (어느 후보를 골라도 담긴다)
     first = scene.end_idxs[0]
-    base = content_lines(texts, clip["start"], first)
+    base = content_lines(texts, scene.stream_id, clip["start"], first)
     parts.append(f"[공통 내용 — 시작 {clip['start']}s ~ 첫 후보 {first}s]\n"
                  + ("\n".join(base) or "  (내용 없음)"))
 
@@ -126,7 +146,7 @@ def render_end_user(query: str, scene: Scene, clip: dict, texts: list[dict]) -> 
         if i == 1:
             parts.append(f"{title} — 공통 내용까지 담고 끝납니다.")
         else:
-            body = content_lines(texts, prev, cand)
+            body = content_lines(texts, scene.stream_id, prev, cand)
             parts.append(f"{title} — 후보 {i - 1} 에서 추가되는 내용:\n"
                          + ("\n".join(body) or "  (추가 내용 없음)"))
         prev = cand
@@ -156,15 +176,15 @@ def make_node(llm: ChatLLM, evidence_repo: EvidenceRepo):
 
         by_no = {}
         for scene in st["scenes"]:
-            by_no[scene.scene_no] = scene
+            by_no[scene.scene_seq] = scene
 
         # 기본 좌표 + rank (picked 순서 = 선곡 중요도)
         clips = []
         targets = []        # LLM 에게 물을 클립 (끝 후보 2개 이상)
-        for rank, scene_no in enumerate(picked, 1):
-            scene = by_no.get(scene_no)
+        for rank, scene_seq in enumerate(picked, 1):
+            scene = by_no.get(scene_seq)
             if scene is None:       # 검산 통과분이라 없을 수 없지만, 침묵 통과는 금지
-                log.warning("select_end_point: picked %d 가 인벤토리에 없음 — 제외", scene_no)
+                log.warning("select_end_point: picked %d 가 인벤토리에 없음 — 제외", scene_seq)
                 continue
             clip = clip_of(scene)
             clip["rank"] = rank     # 선곡 중요도 순위 — 꼬리 자르기의 예산 덜어내기 근거
@@ -187,17 +207,17 @@ def make_node(llm: ChatLLM, evidence_repo: EvidenceRepo):
             user = render_end_user(st["query"], scene, clip, texts)
             try:
                 text = await llm.chat(SYSTEM, user, trace=trace,
-                                      name=f"select_end_point[{scene.scene_no}]")
+                                      name=f"select_end_point[{scene.scene_seq}]")
             except Exception as e:           # noqa: BLE001 — 건별 격리
                 log.warning("select_end_point: scene %d 콜 실패(기본 끝점 유지): %s",
-                            scene.scene_no, e)
+                            scene.scene_seq, e)
                 return
             choice = parse_choice(text, len(scene.end_idxs))
             if choice is None:
                 log.warning("select_end_point: scene %d 응답 판독 불가 %r — 기본 끝점 유지",
-                            scene.scene_no, text)
+                            scene.scene_seq, text)
                 return
-            clip["end"] = scene.end_idxs[choice - 1]
+            clip["end"], clip["end_whole"] = end_at(scene, choice - 1)
             clip["sec"] = clip["end"] - clip["start"]
             clip["end_from"] = f"end_idxs {choice}/{len(scene.end_idxs)} (LLM)"
 
@@ -207,8 +227,9 @@ def make_node(llm: ChatLLM, evidence_repo: EvidenceRepo):
                 tasks.append(choose_one(scene, clip))
             await asyncio.gather(*tasks)
 
-        # 재생은 경기 흐름대로 — 시간순으로 확정한다 (중요도는 rank 가 든다)
-        clips.sort(key=lambda c: c["start"])
+        # 재생은 경기 흐름대로 — 시간순으로 확정한다 (중요도는 rank 가 든다).
+        # 정렬 키는 scene_seq — start 는 청크 축이라 청크가 바뀌면 0 부터 다시 센다.
+        clips.sort(key=lambda c: c["scene_seq"])
 
         total = 0
         for clip in clips:
@@ -219,7 +240,7 @@ def make_node(llm: ChatLLM, evidence_repo: EvidenceRepo):
         if trace is not None:
             lines = []
             for clip in clips:
-                lines.append(f"- scene {clip['scene_no']:>3} rank={clip['rank']}: "
+                lines.append(f"- scene {clip['scene_seq']:>3} rank={clip['rank']}: "
                              f"{clip['start']}~{clip['end']}s ({clip['sec']}s) — "
                              f"시작:{clip['start_from']} · 끝:{clip['end_from']}")
             lines.append(f"- 총 {len(clips)}건 · {total}s · LLM 선택 {len(targets)}건")

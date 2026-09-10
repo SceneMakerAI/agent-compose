@@ -103,10 +103,10 @@ def apply_spec(scenes: list[Scene], spec: dict) -> list[Scene]:
     Summary:
         필터 스펙을 인벤토리에 결정적으로 적용한다 — 선곡 후보를 모은다.
     Args:
-        scenes (list[Scene]): 인벤토리 전량 (scene_no 순).
+        scenes (list[Scene]): 인벤토리 전량 (scene_seq 순).
         spec (dict): parse_query 스펙 (innings·teams·view·labels·board_tags).
     Returns:
-        list[Scene]: 후보 구간 (scene_no 순 유지). 축이 전부 비면 전량 그대로.
+        list[Scene]: 후보 구간 (scene_seq 순 유지). 축이 전부 비면 전량 그대로.
     Description:
         - 매칭식: 이닝 AND 팀명(관점 해석) AND (라벨 OR 전광판). 축 안의 값끼리는 OR.
         - 팀명은 view 와 조합: 공격 = 그 팀 타석 / 수비 = 상대 타석 / 무지정 = 안 좁힘.
@@ -172,11 +172,13 @@ def build_clip_contents(candidates: list[Scene], texts: list[dict],
         texts (list[dict]): 증거 원문 전량 (fetch_texts — 시간순).
         evidence_hits (list[dict]): 벡터 검색 히트 원본 — [질의 유사] 표기 근거.
     Returns:
-        dict[int, dict]: scene_no → {clip: clip_of 결과, lines: 내용 줄 목록}.
+        dict[int, dict]: scene_seq → {clip: clip_of 결과, lines: 내용 줄 목록}.
     Description:
         - 클립 범위는 select_end_point.clip_of 와 같은 규칙 — 프롬프트에 보여주는
           범위와 실제로 잘리는 범위가 어긋나지 않는다.
         - 시간 겹침으로 귀속한다 (끝 후보가 구간 밖까지 나가는 사례 대응 — 실측).
+          증거 시각도 클립 좌표도 청크 축이라 **같은 stream_id 끼리만** 본다
+          (select_end_point.content_lines 와 같은 규칙 — 한쪽만 고치면 어긋난다).
         - 같은 (종류, 내용) 반복은 1줄만 (etc 프레임 반복 자막 대응).
         - 벡터 검색에 걸린 내용은 끝에 [질의 유사] 를 붙인다.
     """
@@ -190,6 +192,8 @@ def build_clip_contents(candidates: list[Scene], texts: list[dict],
         lines = []
         seen = set()
         for row in texts:
+            if row.get("stream_id") != scene.stream_id:
+                continue
             # 시간 겹침 — 점 증거(shot·etc 는 start==end)도 범위 안이면 포함
             if row["end_sec"] < clip["start"] or row["start_sec"] > clip["end"]:
                 continue
@@ -203,7 +207,7 @@ def build_clip_contents(candidates: list[Scene], texts: list[dict],
             star = "★" if key in hit_keys else ""
             label = KIND_LABEL.get(row["kind"], row["kind"])
             lines.append(f"  * [{star}{label}] {row['text']}")
-        contents[scene.scene_no] = {"clip": clip, "lines": lines}
+        contents[scene.scene_seq] = {"clip": clip, "lines": lines}
     return contents
 
 
@@ -212,7 +216,7 @@ def render_inventory(candidates: list[Scene], contents: dict[int, dict]) -> str:
     blocks = []
     for scene in candidates:
         team = batting_team_of(scene)
-        lines = [f"[구간 {scene.scene_no}]",
+        lines = [f"[구간 {scene.scene_seq}]",
                  f"- 이닝: {scene.inning}" + (f" (공격: {team})" if team else "")]
         if scene.labels:
             lines.append(f"- 라벨: {','.join(scene.labels)}")
@@ -229,7 +233,7 @@ def render_inventory(candidates: list[Scene], contents: dict[int, dict]) -> str:
         if state:
             lines.append(f"- 판세: {state}")
 
-        entry = contents.get(scene.scene_no)
+        entry = contents.get(scene.scene_seq)
         if entry:
             clip = entry["clip"]
             lines.append(f"- 클립: {clip['start']}~{clip['end']}s ({clip['sec']}s)")
@@ -248,7 +252,7 @@ def render_user(query: str, inventory: str) -> str:
 def parse_picked(text: str, candidates: list[Scene]) -> list[int]:
     """
     Summary:
-        선곡 응답(번호 나열) → 실존 scene_no 목록 — **응답 순서 = 중요도 내림차순 유지**.
+        선곡 응답(번호 나열) → 실존 scene_seq 목록 — **응답 순서 = 중요도 내림차순 유지**.
     Description:
         - 순서가 정보다: 이후 단계(trim_budget)가 예산을 맞출 때 꼬리(덜 중요한 것)부터
           버리는 근거가 이 순서다. 시간순 정렬은 클립 확정 단계(select_end_point)가 한다.
@@ -257,7 +261,7 @@ def parse_picked(text: str, candidates: list[Scene]) -> list[int]:
     """
     known = set()
     for scene in candidates:
-        known.add(scene.scene_no)
+        known.add(scene.scene_seq)
 
     picked = []
     ghosts = []
@@ -265,12 +269,12 @@ def parse_picked(text: str, candidates: list[Scene]) -> list[int]:
         token = token.strip()
         if not token.isdigit():
             continue
-        scene_no = int(token)
-        if scene_no in known:
-            if scene_no not in picked:
-                picked.append(scene_no)
+        scene_seq = int(token)
+        if scene_seq in known:
+            if scene_seq not in picked:
+                picked.append(scene_seq)
         else:
-            ghosts.append(scene_no)
+            ghosts.append(scene_seq)
     if ghosts:
         log.warning("select_clips 검산: 후보 밖 번호 제거 %s", ghosts)
     return picked
@@ -318,7 +322,7 @@ def make_node(llm: ChatLLM, evidence_repo: EvidenceRepo, tokens_max: int):
         if trace is not None:
             trace.note("select_clips",
                        f"후보 {len(candidates)}/{len(scenes)}구간{note} · 프롬프트 {tokens}토큰",
-                       ", ".join(str(scene.scene_no) for scene in candidates))
+                       ", ".join(str(scene.scene_seq) for scene in candidates))
 
         if tokens <= tokens_max:
             # 단일 콜 — 후보 전체를 한 프롬프트로. thinking 켬 — 후보 전체에서
@@ -336,7 +340,7 @@ def make_node(llm: ChatLLM, evidence_repo: EvidenceRepo, tokens_max: int):
 
         candidate_nos = []
         for scene in candidates:
-            candidate_nos.append(scene.scene_no)
+            candidate_nos.append(scene.scene_seq)
         return {"candidates": candidate_nos,
                 "picked": picked,
                 "status": "ok" if picked else "empty"}
@@ -374,8 +378,8 @@ async def _map_reduce(llm: ChatLLM, query: str, candidates: list[Scene],
     if trace is not None:
         lines = []
         for i, chunk in enumerate(chunks, 1):
-            scene_nos = ", ".join(str(scene.scene_no) for scene in chunk)
-            lines.append(f"- 청크 {i}: {len(chunk)}구간 — {scene_nos}")
+            scene_seqs = ", ".join(str(scene.scene_seq) for scene in chunk)
+            lines.append(f"- 청크 {i}: {len(chunk)}구간 — {scene_seqs}")
         trace.note("select_clips", f"맵-리듀스 분기 — {len(chunks)}청크", "\n".join(lines))
 
     async def select_one(index: int, chunk: list[Scene]) -> list[int]:

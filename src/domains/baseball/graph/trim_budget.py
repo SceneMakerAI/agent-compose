@@ -49,10 +49,11 @@ def make_node(budget_margin: float):
                 kept.append(clip)
                 used += clip["sec"]
             else:
-                dropped.append(f"scene{clip['scene_no']}(rank{clip['rank']},{clip['sec']}s)")
+                dropped.append(f"scene{clip['scene_seq']}(rank{clip['rank']},{clip['sec']}s)")
 
-        # 확정은 시간순 — 재생은 경기 흐름대로
-        kept.sort(key=lambda c: c["start"])
+        # 확정은 시간순 — 재생은 경기 흐름대로.
+        # 정렬 키는 scene_seq — start 는 청크 축이라 청크가 바뀌면 0 부터 다시 센다.
+        kept.sort(key=lambda c: c["scene_seq"])
 
         log.info("trim_budget: 예산 %ds[%s](상한 %ds) — %d건 %ds 유지, %d건 버림 %s",
                  budget, source, cap, len(kept), used, len(dropped), dropped or "")
@@ -61,7 +62,7 @@ def make_node(budget_margin: float):
                     f"→ 유지 {len(kept)}건 {used}s")
             lines = [head]
             for clip in kept:
-                lines.append(f"  * scene {clip['scene_no']} rank={clip['rank']} {clip['sec']}s")
+                lines.append(f"  * scene {clip['scene_seq']} rank={clip['rank']} {clip['sec']}s")
             if dropped:
                 lines.append(f"- 버림 {len(dropped)}건: {', '.join(dropped)}")
             trace.note("trim_budget", "예산 덜어내기", "\n".join(lines))

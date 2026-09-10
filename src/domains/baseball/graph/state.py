@@ -23,21 +23,25 @@ class ComposeState(TypedDict, total=False):
     trace: object            # InferTraceLog | None — LLM 콜 기록기 (직렬화 대상 아님)
 
     # --- 노드 산출 (그래프 확장 시 키 추가) ---
-    scenes: list[Scene]      # load_inventory — 인벤토리 불변 스냅샷 (scene_no 순)
+    scenes: list[Scene]      # load_inventory — 인벤토리 불변 스냅샷 (scene_seq 순).
+                             # 스트림 모드면 그 시점까지 적재된 청크만 담긴다
     spec: dict               # parse_query — 필터 스펙. innings·teams(+view 관점) 는
                              # 좁히는 축(AND), labels·board_tags 는 넓게 모으는 축(OR 합침).
                              # phrases 는 벡터 검색어. 빈 목록 = 그 축 필터 안 함.
                              # budget_sec 은 질의가 지정한 목표 분량(초) — 없으면 None
     evidence: list[dict]     # retrieve_evidence — 구간 귀속 검색 결과
-                             # [{scene_no, hits, sim, by_kind, snippets}] (히트수→유사도 순)
+                             # [{stream_id, scene_stream_seq, scene_seq, hits, sim,
+                             #   by_kind, snippets}] (히트수→유사도 순)
     evidence_orphan: int     # 어느 구간에도 안 겹친 히트 수 (색인 누락 의심 신호)
     evidence_hits: list[dict]  # retrieve_evidence — dedup 된 히트 원본 (kind·text·distance…)
                                # select_clips 의 [질의 유사] 표기 근거 (응답에는 미노출)
-    candidates: list[int]    # select_clips — 필터 통과 후보 scene_no (관측용)
-    picked: list[int]        # select_clips — 선곡 확정 scene_no (**중요도 내림차순** —
+    candidates: list[int]    # select_clips — 필터 통과 후보 scene_seq (관측용)
+    picked: list[int]        # select_clips — 선곡 확정 scene_seq (**중요도 내림차순** —
                              # trim_budget 의 예산 덜어내기 근거. 시간순 아님)
     clips: list[dict]        # select_end_point 좌표 확정 → trim_budget 이 예산 절단한 최종.
-                             # [{scene_no, start, end, sec, rank, start_from, end_from}] 시간순
+                             # [{stream_id, scene_stream_seq, scene_seq, start, end, sec,
+                             #   start_whole, end_whole, rank, start_from, end_from}] 시간순.
+                             # start·end 는 청크 축(자를 좌표), *_whole 은 전체 영상 축(저장용)
                              # rank = 선곡 중요도 순위 (1이 가장 중요)
     dropped: list[str]       # trim_budget — 예산 절단으로 버린 클립 기록 (관측·응답용)
     status: str              # ok | empty

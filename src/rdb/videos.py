@@ -2,6 +2,8 @@
 
 DB 연결(풀)은 Database(rdb.pool)가 쥐고, 여기서는 SQL·행 매핑만 담당한다.
 편성 국면은 t_compose.status_code 가 소유한다 — 이 서비스는 t_video 를 쓰지 않는다.
+(분석 국면은 t_video 가 아니라 t_video_file.status_code 로 내려갔다 — 청크 단위다.
+ 여기서는 어느 쪽도 읽지 않는다: 존재 확인과 cate_id 분기에만 쓴다.)
 """
 
 from dataclasses import dataclass
@@ -18,7 +20,6 @@ class Video:
     v_id: int
     cate_id: int | None
     name: str
-    status_code: int | None
     comment: str | None
 
 
@@ -40,7 +41,7 @@ class VideoRepo:
         Description:
             - 도메인 플로우 분기는 cate_id 로 한다 (pipeline.dispatch — 5100=야구).
         """
-        sql = ("SELECT v_id, cate_id, name, status_code, comment "
+        sql = ("SELECT v_id, cate_id, name, comment "
                "FROM t_video WHERE v_id = %s")
         async with self._db.acquire() as conn, conn.cursor(cursor=DictCursor) as cur:
             await cur.execute(sql, (v_id,))

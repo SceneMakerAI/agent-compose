@@ -25,10 +25,24 @@ def make_node(embedder: Embedder, evidence_repo: EvidenceRepo):
     """자원 주입 팩토리 — build.py 가 호출한다."""
 
     async def retrieve_evidence(st: ComposeState) -> dict:
-        """검색어마다 종류별 검색 → 구간(scene_no) 귀속 그룹으로 정리한다."""
+        """검색어마다 종류별 검색 → 구간 귀속 그룹으로 정리한다.
+
+        히트는 구간 정본 키 (stream_id, scene_stream_seq) 로 오고, 표시용 통산
+        번호(scene_seq)는 여기서 인벤토리를 보고 붙인다 — 히트에 실린 통산 번호는
+        앞 청크 재처리로 낡을 수 있어 쓰지 않는다.
+        """
         spec = st.get("spec") or {}
         phrases = spec.get("phrases") or []
         trace = st.get("trace")
+
+        # 구간 정본 키 → 통산 번호. 인벤토리는 한 시점의 일관된 스냅샷이다.
+        seq_by_scene = {}
+        for scene in st.get("scenes") or []:
+            seq_by_scene[(scene.stream_id, scene.scene_stream_seq)] = scene.scene_seq
+
+        def seq_of(row: dict) -> int:
+            """히트·그룹 → 통산 구간 번호. 인벤토리에 없으면 -1 (표시 전용)."""
+            return seq_by_scene.get((row.get("stream_id"), row.get("scene_stream_seq")), -1)
 
         # 검색어 없음 = 구체적 묘사가 없는 범용 질의 — 벡터 검색 생략 (원문 폴백 금지)
         if not phrases:
@@ -56,7 +70,7 @@ def make_node(embedder: Embedder, evidence_repo: EvidenceRepo):
                     lines.append(f"[{kind} 상위 {len(kind_hits)}건]")
                     for h in kind_hits:
                         lines.append(
-                            f"- {h['distance']:.3f} scene {h['scene_no']:>3} "
+                            f"- {h['distance']:.3f} scene {seq_of(h):>3} "
                             f"{h.get('start_sec', 0):.0f}~{h.get('end_sec', 0):.0f}s "
                             f"{h.get('text', '')}")
                     lines.append("")
@@ -73,15 +87,17 @@ def make_node(embedder: Embedder, evidence_repo: EvidenceRepo):
 
         merged = dedup_hits(hits)
         evidence, orphan = group_by_scene(merged)
+        for group in evidence:
+            group["scene_seq"] = seq_of(group)
         log.info("retrieve_evidence: 검색어 %d건 × 종류 %d → 히트 %d → 후보 구간 %s (orphan %d)",
                  len(phrases), len(KINDS), len(hits),
-                 [g["scene_no"] for g in evidence[:10]], orphan)
+                 [g["scene_seq"] for g in evidence[:10]], orphan)
 
         # 구간 귀속 결과 요약 — 최종적으로 select 가 보게 될 후보 순서
         if trace is not None:
             lines = []
             for g in evidence:
-                lines.append(f"- scene {g['scene_no']:>3}: hits {g['hits']} · "
+                lines.append(f"- scene {g['scene_seq']:>3}: hits {g['hits']} · "
                              f"sim {g['sim']:.3f} · {g['by_kind']}")
                 for snippet in g["snippets"]:
                     lines.append(f"    {snippet}")

@@ -144,18 +144,22 @@ async def _run(request: Request, comp_id: int, flow,
 
 
 def _clip_rows(state: dict) -> list[dict]:
-    """최종 클립 → 저장 행. 태그·라벨·이닝은 인벤토리(Scene)에서 scene_no 로 되찾는다."""
+    """최종 클립 → 저장 행. 태그·라벨·이닝은 인벤토리(Scene)에서 scene_seq 로 되찾는다."""
     by_no = {}
     for scene in state.get("scenes") or []:
-        by_no[scene.scene_no] = scene
+        by_no[scene.scene_seq] = scene
 
     rows = []
     for clip in state.get("clips") or []:
-        scene = by_no.get(clip["scene_no"])
+        scene = by_no.get(clip["scene_seq"])
         rows.append({
-            "scene_no": clip["scene_no"],
+            "stream_id": clip["stream_id"],
+            "scene_stream_seq": clip["scene_stream_seq"],
+            "scene_seq": clip["scene_seq"],
             "start": clip["start"],
             "end": clip["end"],
+            "start_whole": clip["start_whole"],
+            "end_whole": clip["end_whole"],
             "tags": ",".join(scene.tags) if scene else "",
             "labels": ",".join(scene.labels) if scene else "",
             "inning": scene.inning if scene else "",
