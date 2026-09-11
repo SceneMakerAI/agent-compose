@@ -5,11 +5,15 @@
 (결과는 이미 DB 에 있고 GET /compose 로 받아갈 수 있다).
 """
 
+from urllib.parse import urlsplit
+
 import httpx
 
 from log import get_logger
 
 log = get_logger(__name__)
+
+ALLOWED_SCHEMES = ("http", "https")
 
 
 def hms(sec: int) -> str:
@@ -52,7 +56,13 @@ def build(v_id: int, stream_id: str, search_id: str, query: str,
 
 
 async def send(url: str, payload: dict, timeout: float) -> None:
-    """통보 1회 — 실패는 삼키고 로그만 (본 작업 비차단)."""
+    """통보 1회 — 실패는 삼키고 로그만 (본 작업 비차단).
+
+    http·https 가 아닌 주소는 보내기 전에 막는다 — file·ftp 등으로 나가지 않게.
+    """
+    if urlsplit(url).scheme.lower() not in ALLOWED_SCHEMES:
+        log.warning("콜백 주소 거부(전송 안 함): %s — http·https 만 허용", url)
+        return
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload)
