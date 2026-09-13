@@ -72,12 +72,6 @@ class Settings(BaseSettings):
     vector_top_k: int = 50              # 검색어·종류 1건당 상위 히트 수 — 넉넉히 받고
                                         # 같은 구간·같은 내용 반복은 dedup 이 걸러낸다
 
-    # --- worker-render (편성 → mp4 렌더링 — GPU 워커) ---
-    # readyz 프로브 제외 — GPU 야간 자동 중지로 서비스 전체가 not-ready 로 뒤집히는 오탐 방지.
-    render_base_url: str                # 예: http://{host}:{port} — 배포별 필수
-    render_timeout: float = 600.0       # 접수 전송 상한 + 백그라운드 감시 총 상한(초)
-    render_poll_interval: float = 5.0   # 렌더 상태 폴링 주기(초)
-
     # --- 로깅 ---
     log_level: str = "INFO"
     log_path: str | None = None

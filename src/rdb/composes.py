@@ -26,19 +26,16 @@ class ComposeStatus(IntEnum):
     status_code 는 t_code FK — 미등록 코드는 저장이 거부된다(신규 코드는 t_code 등록 선행).
     멤버 이름·값은 t_code 를 그대로 따른다 — 임의 개명 금지.
     코드는 그래프 노드가 아니라 **국면**이다 — 노드가 늘어도 값은 그대로다.
-    4010(색인)은 agent-vision 소유가 되어 안 쓴다. 렌더 완료 스탬프 컬럼은 따로 없다 —
-    렌더까지 끝나면 OK(4000)로 복귀한다 (t_code 설명대로 편성·렌더 공용 종결.
-    재렌더는 언제든 허용 — 같은 comp_id 출력 덮어쓰기).
     """
 
-    OK = 4000            # COMPOSE-OK — 편성(·렌더) 완료
-    EMPTY = 4001         # COMPOSE-EMPTY — 조건 부합 장면 없음 (빈 편성 정상 종결)
-    PLAN = 4020          # COMPOSE-PLAN — 질의 해석·선곡 중 (접수~select_clips)
-    CUT = 4030           # COMPOSE-CUT — 클립 구간 확정 중 (select_end_point)
-    VERIFY = 4040        # COMPOSE-VERIFY — 검수·예산 절단 중 (trim_budget~저장)
-    RENDER = 4050        # COMPOSE-RENDER — mp4 렌더링 중 (워커 접수~완료 감시)
-    ERROR = 4900         # COMPOSE-ERROR — 편성 실패 (사유는 잡·로그가 소유)
-    ERROR_RENDER = 4950  # COMPOSE-ERROR-RENDER — 렌더 실패 (편성은 저장됨 — 재렌더 가능)
+    OK = 4000            # 편성 완료
+    EMPTY = 4001         # 조건 부합 장면 없음
+    PLAN = 4020          # 질의 해석·선곡 중
+    CUT = 4030           # 클립 구간 확정 중
+    VERIFY = 4040        # 검수·예산 절단 중
+    RENDER = 4050        # 렌더 중
+    ERROR = 4900         # 편성 실패
+    ERROR_RENDER = 4950  # 렌더 실패
 
 
 # status_code → (code, result) — 조회·통보 응답의 상태 표현.
@@ -131,17 +128,6 @@ class ComposeRepo:
         except Exception as e:               # noqa: BLE001 — 표시용 갱신은 본 작업 비차단
             log.warning("status_code 갱신 실패 (v_id=%s comp_id=%s code=%s): %s",
                         v_id, comp_id, int(status), e)
-
-    async def set_bumper(self, v_id: int, comp_id: int, bumper: bool) -> None:
-        """
-        Summary:
-            bumper_yn 갱신 — 렌더 요청이 범퍼를 명시했을 때만 호출한다 (재렌더 시 변경 용도).
-        """
-        async with self._db.acquire() as conn, conn.cursor() as cur:
-            await cur.execute(
-                "UPDATE t_compose SET bumper_yn = %s "
-                "WHERE v_id = %s AND comp_id = %s",
-                ("Y" if bumper else "N", v_id, comp_id))
 
     async def finish(self, v_id: int, comp_id: int, status: ComposeStatus,
                      clips: list[dict]) -> None:

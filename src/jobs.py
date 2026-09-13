@@ -21,7 +21,7 @@ class RunningGuard:
     """
 
     def __init__(self, name: str) -> None:
-        """name 은 로그 식별용 (예: 'ingest', 'render')."""
+        """name 은 로그 식별용 (예: 'compose')."""
         self._name = name
         self._keys: set[Hashable] = set()
 

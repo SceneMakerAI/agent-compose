@@ -17,6 +17,7 @@ def main() -> None:
         host=settings.app_host,
         port=settings.app_port,
         log_config=None,  # 로깅은 app 의 setup_logging 가 구성 — uvicorn 기본과 중복 방지
+        access_log=False,  # 요청·응답 줄은 api.middleware 가 본문까지 찍는다
         # SIGTERM 후 무기한 대기 금지 — 진행 중 백그라운드 플로우가 살아남아
         # 새 프로세스와 DB 를 경합 오염시키는 것을 방지. 상한 내 미종료 시 강제 취소.
         timeout_graceful_shutdown=10,

@@ -8,16 +8,18 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from api.errors import ApiError
-from api.router import api_router
+from api.middleware import AccessLogMiddleware
+from api.routes import api_router
 from config import Settings, get_settings
 from infer.chat import ChatLLM
 from infer.embedder import Embedder
 from log import get_logger, setup_logging
 from rdb.pool import Database
-from render.client import RenderClient
 from vector.client import VectorClient
 
 log = get_logger(__name__)
@@ -53,13 +55,11 @@ async def lifespan(app: FastAPI):
     log.info("접속 테스트 — LLM: %s", "OK" if await app.state.llm.ready() else "FAIL")
     app.state.embedder = Embedder(settings)
     log.info("접속 테스트 — embed: %s", "OK" if await app.state.embedder.ready() else "FAIL")
-    app.state.render = RenderClient(settings)
     log.info("AGENT COMPOSE 준비 완료.")
 
     try:
         yield
     finally:
-        await app.state.render.aclose()
         await app.state.embedder.aclose()
         await app.state.llm.aclose()
         await app.state.vector.aclose()
@@ -68,6 +68,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Agent Compose", version="0.1.0", lifespan=lifespan)
+app.add_middleware(AccessLogMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """요청 검증 실패(422) 사유를 로그에 남긴다 — 응답은 FastAPI 기본 그대로."""
+    reasons = [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()]
+    log.info("요청 검증 실패: %s %s → %s", request.method, request.url.path, reasons)
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.exception_handler(ApiError)
@@ -87,5 +96,5 @@ async def unhandled_exception_handler(request: Request, _exc: Exception) -> JSON
     )
 
 
-# 집계 라우터 — 라우터 추가/변경은 api/router.py 에서.
+# 집계 라우터 — 라우터 추가/변경은 api/routes/__init__.py 에서.
 app.include_router(api_router)
