@@ -67,7 +67,7 @@ class ComposeRepo:
         self._db = db
 
     async def create(self, v_id: int, query: str, budget_sec: int | None,
-                     stream_id: str = "VOD",
+                     stream_id: str | None = None,
                      callback_url: str | None = None) -> tuple[int, str]:
         """
         Summary:
@@ -76,7 +76,7 @@ class ComposeRepo:
             v_id (int): 대상 영상 id.
             query (str): 사용자 질의 원문.
             budget_sec (int | None): 요청 목표 분량(초) — 미지정이면 NULL.
-            stream_id (str): 요청이 준 값 — 보관 전용 (편성 범위를 좁히지 않는다).
+            stream_id (str | None): 편성 범위 청크 — 미지정(NULL)이면 영상 전체.
             callback_url (str | None): 편성 완료 통보 URL — 미지정이면 NULL.
         Returns:
             tuple[int, str]: (comp_id, search_id). search_id 는 {요청일}-{v_id}-{comp_id}.

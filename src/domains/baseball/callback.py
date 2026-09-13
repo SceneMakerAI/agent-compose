@@ -23,17 +23,19 @@ def hms(sec: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def build(v_id: int, stream_id: str, search_id: str, query: str,
-          code: int, result: str, clips: list[dict]) -> dict:
+def build(
+    v_id: int, search_id: str, query: str, code: int, result: str, clips: list[dict]
+) -> dict:
     """
     Summary:
         통보 본문 조립 — 좌표는 청크 축(그 클립이 속한 stream_id 기준)이다.
     Args:
         clips (list[dict]): _clip_rows 산출 (stream_id·start·end·inning 시간순).
     Returns:
-        dict: {v_id, stream_id, search_id, query, result, code, scenes}.
+        dict: {v_id, search_id, query, result, code, scenes}.
     """
     scenes = []
+    
     for clip in clips:
         scenes.append({
             "v_id": v_id,
@@ -44,9 +46,9 @@ def build(v_id: int, stream_id: str, search_id: str, query: str,
             "end_sec": clip["end"],
             "text": clip["inning"],
         })
+    
     return {
         "v_id": v_id,
-        "stream_id": stream_id,
         "search_id": search_id,
         "query": query,
         "result": result,

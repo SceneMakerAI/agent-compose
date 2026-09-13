@@ -6,7 +6,8 @@
 from domains.baseball import flow as baseball
 
 # cate_id → 플로우 진입 함수
-# (v_id, comp_id, query, budget_sec, db, llm, embedder, vector, settings, on_node?) -> ComposeState
+# (v_id, comp_id, query, budget_sec, stream_id, db, llm, embedder, vector, settings, on_node?)
+#   -> ComposeState
 DOMAIN_FLOWS = {
     5100: baseball.run,   # 야구
 }

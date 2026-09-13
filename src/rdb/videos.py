@@ -47,3 +47,12 @@ class VideoRepo:
             await cur.execute(sql, (v_id,))
             row = await cur.fetchone()
         return Video(**row) if row else None
+
+    async def has_stream(self, v_id: int, stream_id: str) -> bool:
+        """(v_id, stream_id) 청크가 t_video_file 에 있는지 — 편성 범위 접수 검사."""
+        async with self._db.acquire() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT 1 FROM t_video_file WHERE v_id = %s AND stream_id = %s",
+                (v_id, stream_id))
+            row = await cur.fetchone()
+        return row is not None

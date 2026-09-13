@@ -19,10 +19,10 @@ from vector.client import VectorClient
 log = get_logger(__name__)
 
 
-async def run(v_id: int, comp_id: int, query: str, budget_sec: int | None,
-              db: Database, llm: ChatLLM, embedder: Embedder,
-              vector: VectorClient, settings: Settings,
-              on_node=None) -> ComposeState:
+async def run(
+    v_id: int, comp_id: int, query: str, budget_sec: int | None, stream_id: str | None,
+    db: Database, llm: ChatLLM, embedder: Embedder, vector: VectorClient,
+    settings: Settings, on_node=None) -> ComposeState:
     """
     Summary:
         야구 편성 그래프 1회 실행 — pipeline.dispatch 가 호출.
@@ -31,6 +31,7 @@ async def run(v_id: int, comp_id: int, query: str, budget_sec: int | None,
         comp_id (int): 편성 id — 트레이스 디렉터리({v_id}_{comp_id}/)를 특정한다.
         query (str): 편성 질의.
         budget_sec (int | None): 목표 분량(초) — 마감 단계의 덜어내기 전용.
+        stream_id (str | None): 편성 범위 청크 — None 이면 영상 전체.
         db/llm/embedder/vector/settings: lifespan 공유 자원 (app.state).
         on_node: 노드 완료 **async** 콜백(node_name, elapsed_sec) — API 가 job 진행
             표시·국면 기록(DB)에 쓴다. elapsed_sec 은 그 노드의 소요 초.
@@ -47,17 +48,22 @@ async def run(v_id: int, comp_id: int, query: str, budget_sec: int | None,
     trace = InferTraceLog(settings.trace_dir, v_id, comp_id)
     state: ComposeState = {}
     prev = time.monotonic()
+    
     async for step in graph.astream(
-            {"v_id": v_id, "query": query, "budget_sec": budget_sec, "trace": trace},
+            {"v_id": v_id, "stream_id": stream_id, "query": query,
+             "budget_sec": budget_sec, "trace": trace},
             stream_mode="updates"):
 
         for node, upd in step.items():
             now = time.monotonic()
             elapsed = round(now - prev, 1)
             prev = now
-            log.info("── 노드 %s 완료 (%.1fs, 갱신: %s)", node, elapsed,
-                     ", ".join(k for k in (upd or ()) if k != "scenes") or "-")
+            log.info(
+                "── 노드 %s 완료 (%.1fs, 갱신: %s)", node, elapsed, 
+                ", ".join(k for k in (upd or ()) if k != "scenes") or "-")
+            
             state.update(upd or {})
+            
             if on_node:
                 await on_node(node, elapsed)
 

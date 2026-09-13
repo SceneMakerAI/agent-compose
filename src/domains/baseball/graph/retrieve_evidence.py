@@ -60,7 +60,8 @@ def make_node(embedder: Embedder, evidence_repo: EvidenceRepo):
                 # 종류별 검색 — 트레이스에 kind 섹션으로 나눠 남긴다
                 lines: list[str] = []
                 for kind in KINDS:
-                    kind_hits = await evidence_repo.search(query_vec, st["v_id"], kind)
+                    kind_hits = await evidence_repo.search(
+                        query_vec, st["v_id"], kind, st.get("stream_id"))
                     # 같은 구간의 **동일한 내용**은 1건으로 접는다 — etc 는 프레임
                     # 반복 자막이라 group_size=2 가 같은 텍스트 2건이 되기 쉽다.
                     # 내용이 다르면 2건 다 남는다 (구간당 상한은 grouping search 몫).

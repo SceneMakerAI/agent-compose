@@ -197,7 +197,7 @@ def make_node(llm: ChatLLM, evidence_repo: EvidenceRepo):
         # 끝 후보가 갈리는 클립만 LLM 에게 — 내용 재료는 Milvus 1콜
         if targets:
             try:
-                texts = await evidence_repo.fetch_texts(st["v_id"])
+                texts = await evidence_repo.fetch_texts(st["v_id"], st.get("stream_id"))
             except Exception as e:           # noqa: BLE001 — 재료 실패면 기본값으로 진행
                 log.warning("select_end_point 내용 조회 실패(기본 끝점 유지): %s", e)
                 texts = []

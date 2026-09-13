@@ -130,10 +130,20 @@ class EvidenceRepo:
         self._col = settings.milvus_collection
         self._top_k = settings.vector_top_k
 
-    async def fetch_texts(self, v_id: int) -> list[dict]:
+    @staticmethod
+    def _scope(v_id: int, stream_id: str | None) -> str:
+        """편성 범위 필터식 — 영상 전체 또는 지정 청크."""
+        expr = f"v_id == {v_id}"
+        if stream_id is not None:
+            expr += f' and stream_id == "{stream_id}"'
+        return expr
+
+    async def fetch_texts(self, v_id: int, stream_id: str | None = None) -> list[dict]:
         """
         Summary:
             증거 원문 전량 — 클립 범위의 "클립 내용" 렌더 재료 (벡터 제외라 가볍다).
+        Args:
+            stream_id (str | None): 주면 그 청크만, None 이면 영상 전체.
         Returns:
             list[dict]: {kind, start_sec, end_sec, stream_id, scene_stream_seq, text}
                 — 청크별로 묶이고 그 안에서 시간순.
@@ -144,7 +154,7 @@ class EvidenceRepo:
               소비부가 stream_id 로 먼저 거르므로 청크 안 순서만 맞으면 된다.
         """
         rows = await self._vector.query(
-            self._col, f"v_id == {v_id}",
+            self._col, self._scope(v_id, stream_id),
             ["kind", "start_sec", "end_sec", "stream_id", "scene_stream_seq", "text"],
             _QUERY_LIMIT)
         if len(rows) >= _QUERY_LIMIT:
@@ -156,10 +166,13 @@ class EvidenceRepo:
         return rows
 
     async def search(self, query_vec: list[float], v_id: int,
-                     kind: str | None = None) -> list[dict]:
+                     kind: str | None = None,
+                     stream_id: str | None = None) -> list[dict]:
         """
         Summary:
-            질의 벡터로 v_id 범위 검색 — 상위 top_k 히트. kind 를 주면 그 종류만.
+            질의 벡터로 편성 범위 검색 — 상위 top_k 히트. kind 를 주면 그 종류만.
+        Args:
+            stream_id (str | None): 주면 그 청크만, None 이면 영상 전체.
         Returns:
             list[dict]: {distance, kind, start_sec, end_sec, stream_id,
                 scene_stream_seq, text, …}.
@@ -168,27 +181,27 @@ class EvidenceRepo:
               제외한다. 구간에 귀속할 수 없어 편성에 못 쓰는데 top_k 자리만 차지한다.
             - top_k 는 넉넉히(50) 받는다 — etc 등 프레임 반복 색인 탓에 같은
               구간·같은 내용 히트가 섞여 오고, 그건 dedup_hits 가 걸러낸다.
-            - 범위는 v_id 전체 — 청크를 가리지 않는다 (적재된 청크가 곧 편성 범위).
         """
-        filter_expr = f"v_id == {v_id} and scene_stream_seq >= 0"
+        filter_expr = f"{self._scope(v_id, stream_id)} and scene_stream_seq >= 0"
         if kind is not None:
             filter_expr += f' and kind == "{kind}"'
         return await self._vector.search(self._col, query_vec, filter_expr,
                                          _SEARCH_FIELDS, self._top_k)
 
-    async def meta_vocab(self, v_id: int) -> dict:
+    async def meta_vocab(self, v_id: int, stream_id: str | None = None) -> dict:
         """
         Summary:
-            v_id 증거의 메타 어휘 — 필드별 실존 값 집합 (질의 해석 프롬프트 재료).
+            편성 범위 증거의 메타 어휘 — 필드별 실존 값 집합 (질의 해석 프롬프트 재료).
         Args:
             v_id (int): 대상 영상 id.
+            stream_id (str | None): 주면 그 청크만, None 이면 영상 전체.
         Returns:
             dict: {labels, board_tags, innings, teams: list[str],
                 score_delta_max: int}. 이 경기에 실제로 존재하는 값만 담는다 —
                 LLM 은 이 중에서만 필터를 고르므로 없는 값을 지어낼 수 없다.
                 teams 는 home/away 사실 값의 합집합 (이 경기의 두 팀).
         """
-        rows = await self._vector.query(self._col, f"v_id == {v_id}",
+        rows = await self._vector.query(self._col, self._scope(v_id, stream_id),
                                         _META_FIELDS, _QUERY_LIMIT)
         labels: set[str] = set()
         board_tags: set[str] = set()

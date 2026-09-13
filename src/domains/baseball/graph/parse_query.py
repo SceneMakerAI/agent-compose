@@ -25,7 +25,7 @@ def make_node(llm: ChatLLM, evidence_repo: EvidenceRepo, team_repo: TeamRepo):
         실패하면 필터 없음(전체 인벤토리)으로 진행한다 — 보조 단계가 편성을 죽이지
         않는다. 어휘 밖 값은 파서가 버린다.
         """
-        vocab = await evidence_repo.meta_vocab(st["v_id"])
+        vocab = await evidence_repo.meta_vocab(st["v_id"], st.get("stream_id"))
         team_aliases = await team_repo.fetch()
         try:
             text = await llm.chat(SYSTEM, render_user(st["query"], vocab, team_aliases),

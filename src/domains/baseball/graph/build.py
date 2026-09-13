@@ -28,8 +28,8 @@ from rdb.pool import Database
 from vector.client import VectorClient
 
 
-def build_graph(db: Database, llm: ChatLLM, embedder: Embedder,
-                vector: VectorClient, settings: Settings):
+def build_graph(
+  db: Database, llm: ChatLLM, embedder: Embedder, vector: VectorClient, settings: Settings):
     """자원 주입 배선 — 그래프를 컴파일해 돌려준다.
 
     지금은 요청마다 빌드한다 — 자원이 다 배선돼 구성이 굳으면 lifespan 1회
@@ -41,14 +41,26 @@ def build_graph(db: Database, llm: ChatLLM, embedder: Embedder,
 
     g = StateGraph(ComposeState)
 
-    g.add_node("load_inventory", load_inventory.make_node(scene_repo))
-    g.add_node("parse_query", parse_query.make_node(llm, evidence_repo, team_repo))
-    g.add_node("retrieve_evidence", retrieve_evidence.make_node(embedder, evidence_repo))
-    g.add_node("select_clips", select_clips.make_node(llm, evidence_repo,
-                                                      settings.select_tokens_max))
-    g.add_node("select_end_point", select_end_point.make_node(llm, evidence_repo))
-    g.add_node("merge_overlap", merge_overlap.make_node())
-    g.add_node("trim_budget", trim_budget.make_node(settings.budget_margin))
+    g.add_node("load_inventory", 
+               load_inventory.make_node(scene_repo))
+    
+    g.add_node("parse_query", 
+               parse_query.make_node(llm, evidence_repo, team_repo))
+    
+    g.add_node("retrieve_evidence", 
+               retrieve_evidence.make_node(embedder, evidence_repo))
+    
+    g.add_node("select_clips", 
+               select_clips.make_node(llm, evidence_repo, settings.select_tokens_max))
+    
+    g.add_node("select_end_point", 
+               select_end_point.make_node(llm, evidence_repo))
+    
+    g.add_node("merge_overlap", 
+               merge_overlap.make_node())
+    
+    g.add_node("trim_budget", 
+               trim_budget.make_node(settings.budget_margin))
 
     g.add_edge(START, "load_inventory")
     g.add_edge("load_inventory", "parse_query")

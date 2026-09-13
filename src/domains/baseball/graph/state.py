@@ -16,6 +16,7 @@ from domains.baseball.repo.scenes import Scene
 class ComposeState(TypedDict, total=False):
     # --- 입력 ---
     v_id: int
+    stream_id: str | None    # 편성 범위 청크 — None 이면 영상 전체
     query: str               # 사용자 질의 원문
     budget_sec: int | None   # 목표 분량(초) — 마감 단계 덜어내기 전용.
                              # API 파라미터 값. 없으면 trim_budget 이 질의에서 읽은

@@ -304,7 +304,7 @@ def make_node(llm: ChatLLM, evidence_repo: EvidenceRepo, tokens_max: int):
 
         # 클립 내용 재료 — 증거 원문 전량 1콜. 실패해도 선곡은 계속한다 (보드 사실만으로).
         try:
-            texts = await evidence_repo.fetch_texts(st["v_id"])
+            texts = await evidence_repo.fetch_texts(st["v_id"], st.get("stream_id"))
         except Exception as e:               # noqa: BLE001 — 보조 재료, 죽이지 않는다
             log.warning("select_clips 클립 내용 조회 실패(보드 사실만으로 진행): %s", e)
             texts = []

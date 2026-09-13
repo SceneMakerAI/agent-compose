@@ -70,17 +70,18 @@ class SceneRepo:
         """Database(커넥션 풀 래퍼)를 주입받는다."""
         self._db = db
 
-    async def fetch(self, v_id: int) -> list[Scene]:
+    async def fetch(self, v_id: int, stream_id: str | None = None) -> list[Scene]:
         """
         Summary:
             영상 1건의 scene 구간을 시간순으로 읽는다 — 편성 인벤토리.
         Args:
             v_id (int): 대상 영상 id.
+            stream_id (str | None): 주면 그 청크만, None 이면 영상 전체.
         Returns:
             list[Scene]: 구간 목록 — 없으면 빈 목록 (호출부가 발행 선행 오류로 변환).
         Description:
-            - 범위는 v_id 전체 — 청크를 가리지 않는다. 스트림이 아직 도착 중이면
-              그 시점까지 적재된 청크만 담겨 온다 (부분 편성이 정상 동작이다).
+            - 전체 범위일 때 스트림이 아직 도착 중이면 그 시점까지 적재된 청크만
+              담겨 온다 (부분 편성이 정상 동작이다).
         """
         sql = (
             "SELECT stream_id, scene_stream_seq, scene_seq, "
@@ -88,10 +89,15 @@ class SceneRepo:
             "       start_scb_sec, end_scb_sec, pitch_sec, end_secs, "
             "       inning, home_team, away_team, score_home, score_away, "
             "       tags, labels, diff_out, diff_base, diff_score "
-            "FROM t_scene_baseball WHERE v_id = %s ORDER BY scene_seq"
+            "FROM t_scene_baseball WHERE v_id = %s"
         )
+        params: tuple = (v_id,)
+        if stream_id is not None:
+            sql += " AND stream_id = %s"
+            params += (stream_id,)
+        sql += " ORDER BY scene_seq"
         async with self._db.acquire() as conn, conn.cursor(cursor=DictCursor) as cur:
-            await cur.execute(sql, (v_id,))
+            await cur.execute(sql, params)
             rows = list(await cur.fetchall())
         scenes = [Scene(
             stream_id=r["stream_id"],
@@ -116,5 +122,6 @@ class SceneRepo:
             diff_base=r["diff_base"],
             diff_score=r["diff_score"],
         ) for r in rows]
-        log.info("t_scene_baseball 조회: v_id=%s (%d구간)", v_id, len(scenes))
+        log.info("t_scene_baseball 조회: v_id=%s stream_id=%s (%d구간)",
+                 v_id, stream_id or "전체", len(scenes))
         return scenes
