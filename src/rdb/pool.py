@@ -43,7 +43,8 @@ class Database:
             Database: 풀이 준비된 인스턴스.
         Description:
             - lifespan 에서 app.state.db 에 보관할 인스턴스를 만드는 진입점.
-            - autocommit=True — 단건 UPDATE 위주라 명시 트랜잭션 없이 운용한다.
+            - autocommit=True — 단건 UPDATE 는 그대로, 원자성·락이 필요한 메서드만
+              conn.begin() 으로 명시 트랜잭션을 연다.
             - pool_recycle 은 NAT 경유 환경에서 짧게 — 유휴 커넥션 강제 종료 대비.
         """
         pool = await asyncmy.create_pool(

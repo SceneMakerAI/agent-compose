@@ -82,28 +82,36 @@ class ComposeRepo:
               클립·집계는 finish() 가 채운다.
         """
         async with self._db.acquire() as conn:
-            async with conn.cursor() as cur:
-                # comp_id 발급 — 같은 v_id 의 동시 접수는 FOR UPDATE 가 직렬화한다
-                await cur.execute(
-                    "SELECT COALESCE(MAX(comp_id), 0) + 1 FROM t_compose "
-                    "WHERE v_id = %s FOR UPDATE", (v_id,))
-                (comp_id,) = await cur.fetchone()
-                comp_id = int(comp_id)      # 집계 결과는 Decimal 로 온다
+            # autocommit 풀이라 FOR UPDATE 락은 명시 트랜잭션 안에서만 유지된다
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    # 같은 v_id 접수 직렬화
+                    await cur.execute(
+                        "SELECT v_id FROM t_video WHERE v_id = %s FOR UPDATE", (v_id,))
+                    await cur.execute(
+                        "SELECT COALESCE(MAX(comp_id), 0) + 1 FROM t_compose "
+                        "WHERE v_id = %s", (v_id,))
+                    (comp_id,) = await cur.fetchone()
+                    comp_id = int(comp_id)      # 집계 결과는 Decimal 로 온다
 
-                # search_id 의 날짜는 DB 시계로 만든다 — reg_datetime 과 어긋나지 않게
-                await cur.execute(
-                    "INSERT INTO t_compose (v_id, comp_id, search_id, stream_id, query, "
-                    "  budget_sec, callback_url, status_code) "
-                    "VALUES (%s, %s, "
-                    "        CONCAT(DATE_FORMAT(NOW(), '%%Y%%m%%d'), '-', %s, '-', %s), "
-                    "        %s, %s, %s, %s, %s)",
-                    (v_id, comp_id, v_id, comp_id, stream_id, query, budget_sec,
-                     callback_url, int(ComposeStatus.PLAN)))
-                await cur.execute(
-                    "SELECT search_id FROM t_compose WHERE v_id = %s AND comp_id = %s",
-                    (v_id, comp_id))
-                (search_id,) = await cur.fetchone()
-            await conn.commit()
+                    # search_id 의 날짜는 DB 시계로 만든다 — reg_datetime 과 어긋나지 않게
+                    await cur.execute(
+                        "INSERT INTO t_compose (v_id, comp_id, search_id, stream_id, query, "
+                        "  budget_sec, callback_url, status_code) "
+                        "VALUES (%s, %s, "
+                        "        CONCAT(DATE_FORMAT(NOW(), '%%Y%%m%%d'), '-', %s, '-', %s), "
+                        "        %s, %s, %s, %s, %s)",
+                        (v_id, comp_id, v_id, comp_id, stream_id, query, budget_sec,
+                         callback_url, int(ComposeStatus.PLAN)))
+                    await cur.execute(
+                        "SELECT search_id FROM t_compose WHERE v_id = %s AND comp_id = %s",
+                        (v_id, comp_id))
+                    (search_id,) = await cur.fetchone()
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
         log.info("t_compose 접수: v_id=%s comp_id=%s search_id=%s %r",
                  v_id, comp_id, search_id, query)
         return comp_id, search_id
@@ -147,29 +155,34 @@ class ComposeRepo:
             duration += clip["end"] - clip["start"]
 
         async with self._db.acquire() as conn:
-            async with conn.cursor() as cur:
-                if clips:
-                    rows = []
-                    for seq, clip in enumerate(clips, 1):
-                        rows.append((v_id, comp_id, seq,
-                                     clip["stream_id"], clip["scene_stream_seq"],
-                                     clip["scene_seq"], clip["merge_seqs"],
-                                     clip["start"], clip["end"],
-                                     clip["start_whole"], clip["end_whole"],
-                                     clip["tags"], clip["labels"], clip["inning"]))
-                    await cur.executemany(
-                        "INSERT INTO t_compose_clip (v_id, comp_id, clip_seq, "
-                        "  stream_id, scene_stream_seq, scene_seq, merge_seqs, "
-                        "  start_stream_sec, end_stream_sec, start_sec, end_sec, "
-                        "  tags, labels, inning) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                        rows)
-                await cur.execute(
-                    "UPDATE t_compose "
-                    "SET status_code = %s, duration_sec = %s, clip_cnt = %s "
-                    "WHERE v_id = %s AND comp_id = %s",
-                    (int(status), duration, len(clips), v_id, comp_id))
-            await conn.commit()
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    if clips:
+                        rows = []
+                        for seq, clip in enumerate(clips, 1):
+                            rows.append((v_id, comp_id, seq,
+                                         clip["stream_id"], clip["scene_stream_seq"],
+                                         clip["scene_seq"], clip["merge_seqs"],
+                                         clip["start"], clip["end"],
+                                         clip["start_whole"], clip["end_whole"],
+                                         clip["tags"], clip["labels"], clip["inning"]))
+                        await cur.executemany(
+                            "INSERT INTO t_compose_clip (v_id, comp_id, clip_seq, "
+                            "  stream_id, scene_stream_seq, scene_seq, merge_seqs, "
+                            "  start_stream_sec, end_stream_sec, start_sec, end_sec, "
+                            "  tags, labels, inning) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                            rows)
+                    await cur.execute(
+                        "UPDATE t_compose "
+                        "SET status_code = %s, duration_sec = %s, clip_cnt = %s "
+                        "WHERE v_id = %s AND comp_id = %s",
+                        (int(status), duration, len(clips), v_id, comp_id))
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
         log.info("t_compose 종결: v_id=%s comp_id=%s status=%s (%d클립, %ds)",
                  v_id, comp_id, status.name, len(clips), duration)
 
