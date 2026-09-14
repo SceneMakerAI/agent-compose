@@ -1,6 +1,7 @@
 """편성(compose) 라우트 — 연동 규격 API. 접수 가부·조회 결과는 본문 code(0/-1)로 알린다.
 
-백그라운드 본체는 pipeline.compose_run — 여기는 접수 검사·잡/가드 관리·응답 조립만.
+백그라운드 본체는 pipeline.compose_run — 여기는 접수 검사·동시 상한·응답 조립만.
+진행·결과의 정본은 DB(t_compose) — 프로세스 안에는 진행 중 건수만 든다.
 """
 
 from fastapi import APIRouter, BackgroundTasks, Request
@@ -8,7 +9,6 @@ from pydantic import BaseModel
 
 from api.errors import ComposeNotFoundError
 from domains.baseball import callback
-from jobs import JobStore, RunningGuard
 from log import get_logger
 from pipeline import compose_run, dispatch
 from rdb.composes import ComposeRepo, result_of
@@ -17,9 +17,7 @@ from rdb.videos import VideoRepo
 log = get_logger(__name__)
 router = APIRouter(tags=["compose"])
 
-_jobs = JobStore()      # (v_id, comp_id) → 진행·결과 — /inter-compose 전용
-_SLOT = "compose"       # 편성은 한 번에 한 건
-_guard = RunningGuard("compose")
+_running = 0            # 진행 중 편성 건수 — 상한은 settings.compose_concurrency
 
 
 class ComposeRequest(BaseModel):
@@ -59,21 +57,19 @@ async def post_compose(
             v_id=req.v_id, code=-1,
             result=f"지원하지 않는 카테고리입니다. (cate_id={video.cate_id})")
 
-    if not _guard.try_acquire(_SLOT):
+    global _running
+    if _running >= request.app.state.settings.compose_concurrency:
         return ComposeAccepted(
             v_id=req.v_id, code=-1,
             result="편성이 진행 중입니다. 잠시 후 다시 요청해 주세요.")
 
+    _running += 1
     try:
         comp_id, search_id = await ComposeRepo(request.app.state.db).create(
             req.v_id, req.query, req.budget_sec, req.stream_id, req.callback_url)
     except Exception:
-        _guard.release(_SLOT)
+        _running -= 1
         raise
-
-    _jobs.create(
-        (req.v_id, comp_id),
-        v_id=req.v_id, comp_id=comp_id, query=req.query, progress=[])
 
     order = compose_run.Order(**req.model_dump())
     background.add_task(_run, request, comp_id, search_id, flow, order)
@@ -88,11 +84,11 @@ async def post_compose(
 
 async def _run(request: Request, comp_id: int, search_id: str, flow,
                order: compose_run.Order) -> None:
+    global _running
     try:
-        await compose_run.execute(
-            request.app.state, _jobs, comp_id, search_id, flow, order)
+        await compose_run.execute(request.app.state, comp_id, search_id, flow, order)
     finally:
-        _guard.release(_SLOT)
+        _running -= 1
 
 
 @router.get("/compose")
@@ -115,10 +111,7 @@ async def get_compose(v_id: int, search_id: str, request: Request) -> dict:
 
 @router.get("/inter-compose")
 async def get_inter_compose(v_id: int, comp_id: int, request: Request) -> dict:
-    """편성 조회(디버깅용) — 인메모리 잡 우선, 없으면 저장분. 연동 규격 아님."""
-    job = _jobs.get((v_id, comp_id))
-    if job is not None:
-        return job
+    """편성 조회(디버깅용) — 저장분 그대로(헤더+클립). 연동 규격 아님."""
     row = await ComposeRepo(request.app.state.db).fetch(v_id, comp_id)
     if row is None:
         raise ComposeNotFoundError(v_id=v_id, comp_id=comp_id)

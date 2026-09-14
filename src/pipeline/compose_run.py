@@ -1,12 +1,10 @@
-"""편성 백그라운드 본체 — flow 실행 → 저장 → 잡 갱신 → 통보. HTTP 를 모른다."""
+"""편성 백그라운드 본체 — flow 실행 → 저장 → 통보. HTTP 를 모른다."""
 
 import asyncio
-import time
 from dataclasses import dataclass
 
 from domains.baseball import callback
 from domains.baseball.rows import clip_rows
-from jobs import JobStore
 from log import bind_v_id, get_logger
 from rdb.composes import ComposeRepo, ComposeStatus
 
@@ -31,16 +29,11 @@ _PHASE_AFTER = {
 }
 
 
-async def execute(st, jobs: JobStore, comp_id: int, search_id: str, flow,
-                  order: Order) -> None:
-    """편성 1건 실행 — 잡 (v_id, comp_id) 는 호출부가 미리 만들어 둔다."""
+async def execute(st, comp_id: int, search_id: str, flow, order: Order) -> None:
+    """편성 1건 실행 — t_compose 행(PLAN)은 호출부가 미리 만들어 둔다."""
     repo = ComposeRepo(st.db)
-    job_key = (order.v_id, comp_id)
-    progress: list[dict] = jobs.get(job_key)["progress"]
-    started = time.monotonic()
 
     async def on_node(node: str, elapsed: float) -> None:
-        progress.append({"node": node, "sec": elapsed})
         phase = _PHASE_AFTER.get(node)
         if phase is not None:
             await repo.set_status(order.v_id, comp_id, phase)
@@ -56,39 +49,24 @@ async def execute(st, jobs: JobStore, comp_id: int, search_id: str, flow,
             rows = clip_rows(state)
             await repo.finish(order.v_id, comp_id, final, rows)
 
-        jobs.replace(job_key, {
-            "comp_id": comp_id,
-            "status": state.get("status", "ok"),
-            "v_id": order.v_id,
-            "query": order.query,
-            "progress": progress,
-            "budget_sec": order.budget_sec,
-            "elapsed_sec": round(time.monotonic() - started, 1),
-            "scene_count": len(state.get("scenes", [])),
-            "spec": state.get("spec"),
-            "evidence": state.get("evidence"),
-            "evidence_orphan": state.get("evidence_orphan"),
-            "candidates": state.get("candidates"),
-            "picked": state.get("picked"),
-            "clips": state.get("clips"),
-            "dropped": state.get("dropped"),
-            "duration_sec": sum(c["sec"] for c in (state.get("clips") or [])),
-        })
         await _notify(order, search_id, 0, "OK", rows, st.settings)
 
     except asyncio.CancelledError:
+        log.warning("compose 취소: v_id=%s comp_id=%s (종료 중)", order.v_id, comp_id)
+        # 뒷정리 중 재취소돼도 ERROR 기록·통보는 끝까지 간다
+        await asyncio.shield(_fail(repo, comp_id, order, search_id, st.settings))
         raise
 
-    except Exception as e:
+    except Exception:
         log.exception("compose 실패: v_id=%s %r", order.v_id, order.query)
-        await repo.set_status(order.v_id, comp_id, ComposeStatus.ERROR)
-        jobs.replace(job_key, {
-            "comp_id": comp_id,
-            "status": "error", "v_id": order.v_id, "query": order.query,
-            "progress": progress, "error": f"{type(e).__name__}: {e}",
-            "elapsed_sec": round(time.monotonic() - started, 1),
-        })
-        await _notify(order, search_id, -1, "fail", [], st.settings)
+        await _fail(repo, comp_id, order, search_id, st.settings)
+
+
+async def _fail(repo: ComposeRepo, comp_id: int, order: Order, search_id: str,
+                settings) -> None:
+    """실패·취소 공통 뒷정리 — ERROR 기록 → fail 통보."""
+    await repo.set_status(order.v_id, comp_id, ComposeStatus.ERROR)
+    await _notify(order, search_id, -1, "fail", [], settings)
 
 
 async def _notify(order: Order, search_id: str, code: int, result: str,

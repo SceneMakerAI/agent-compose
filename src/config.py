@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # 컨텍스트 한도(131k)가 아니라 선곡 품질(후보 많으면 중간을 놓친다)·속도 기준의 값.
     select_tokens_max: int = 25000
 
+    # --- 편성 접수 ---
+    compose_concurrency: int = 1        # 동시 편성 상한 — 초과 접수는 거절(code=-1)
+
     # --- 편성 마감(trim_budget) ---
     # 예산 여유율 — 허용 상한 = budget_sec × (1 + budget_margin). 예산에 딱 맞춰
     # 자르면 대체로 예산 '이하'에서 끝난다 — 목표 분량을 채우는 쪽이 편성 의도에
