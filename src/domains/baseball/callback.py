@@ -5,6 +5,7 @@
 (결과는 이미 DB 에 있고 GET /compose 로 받아갈 수 있다).
 """
 
+import json
 from urllib.parse import urlsplit
 
 import httpx
@@ -68,7 +69,15 @@ async def send(url: str, payload: dict, timeout: float) -> None:
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload)
-        log.info("콜백 전송: %s → %s (scenes %d)",
-                 url, resp.status_code, len(payload["scenes"]))
+        
+        log.info(
+            "콜백 전송: %s → %s (scenes %d)\n%s\n응답: %s\n",
+            url,
+            resp.status_code,
+            len(payload["scenes"]),
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            resp.text,
+        )
+        
     except Exception as e:            # noqa: BLE001 — 보조 단계, 죽이지 않는다
         log.warning("콜백 전송 실패(무시): %s — %s: %s", url, type(e).__name__, e)

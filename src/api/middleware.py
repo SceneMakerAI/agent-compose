@@ -4,6 +4,7 @@
 거절·422·500 을 포함한 모든 결과에 대해 남으므로 "무엇을 보냈길래" 를 로그로 추적할 수 있다.
 """
 
+import json
 import time
 
 from log import get_logger
@@ -11,15 +12,15 @@ from log import get_logger
 log = get_logger(__name__)
 
 SKIP_PATHS = frozenset({"/healthz", "/readyz", "/docs", "/redoc", "/openapi.json"})
-BODY_MAX = 2048
 
 
 def _fmt_body(raw: bytes) -> str:
-    """본문 → 한 줄 문자열. 상한을 넘으면 잘라 표시 (도배 방지)."""
-    text = raw.decode("utf-8", errors="replace").replace("\n", " ").replace("\r", "")
-    if len(text) > BODY_MAX:
-        text = f"{text[:BODY_MAX]}…({len(raw)} bytes)"
-    return text
+    """본문 → 로그 문자열. JSON 이면 들여써서 여러 줄로, 아니면 그대로."""
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        return "\n" + json.dumps(json.loads(text), ensure_ascii=False, indent=2)
+    except ValueError:
+        return text
 
 
 class AccessLogMiddleware:
