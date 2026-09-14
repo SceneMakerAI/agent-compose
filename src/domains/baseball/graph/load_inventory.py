@@ -15,10 +15,9 @@ def make_node(scene_repo: SceneRepo):
         stream_id = st.get("stream_id")
         scenes = await scene_repo.fetch(st["v_id"], stream_id)
         if not scenes:
-            # 발행 선행 미충족 — 조용한 빈 편성이 아니라 오류로 드러낸다
-            raise ValueError(
-                f"t_scene_baseball 가 비어 있음 — agent-vision 분석 선행 필요 "
-                f"(v_id={st['v_id']} stream_id={stream_id})")
+            log.info("인벤토리 없음 — 빈 편성 종결 (v_id=%s stream_id=%s)",
+                     st["v_id"], stream_id)
+            return {"scenes": [], "status": "empty"}
         return {"scenes": scenes}
 
     return load_inventory

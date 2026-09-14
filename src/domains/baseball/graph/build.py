@@ -63,7 +63,9 @@ def build_graph(
                trim_budget.make_node(settings.budget_margin))
 
     g.add_edge(START, "load_inventory")
-    g.add_edge("load_inventory", "parse_query")
+    g.add_conditional_edges(
+        "load_inventory",
+        lambda st: END if not st["scenes"] else "parse_query")
     g.add_edge("parse_query", "retrieve_evidence")
     g.add_edge("retrieve_evidence", "select_clips")
     g.add_edge("select_clips", "select_end_point")
